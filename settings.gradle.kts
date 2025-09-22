@@ -85,4 +85,5 @@ include(":desktop:swing")
 project(":desktop:swing").projectDir = file("./desktop/swing")
 include(":desktop:JavaFX")
 project(":desktop:JavaFX").projectDir = file("./desktop/JavaFx")
+include(":android")
 

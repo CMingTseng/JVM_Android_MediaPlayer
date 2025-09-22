@@ -1,0 +1,36 @@
+plugins {
+    id 'application'
+    alias(libs.plugins.kotlin.jvm)
+    id 'org.openjfx.javafxplugin' version '0.1.0'
+}
+
+group = 'org.bytedeco.javacv'
+version = '1.0.0'
+description = 'JavaFxPlayVideoAndAudio'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
+}
+
+javafx {
+    version = "17"
+    modules = ['javafx.controls', 'javafx.graphics']
+}
+
+application {
+    mainClass.set("org.bytedeco.javacv.JavaFxPlayVideoAndAudio")
+}
+
+dependencies {
+    implementation(libs.org.bytedeco.ffmpeg.platform.gpl)
+    implementation(libs.org.bytedeco.javacv.platform)//FFmpegFrameGrabber Frame JavaFXFrameConverter
+//    implementation(libs.org.bytedeco.opencv.platform.gpu)
+    testImplementation(libs.kotlin.testJunit)
+}

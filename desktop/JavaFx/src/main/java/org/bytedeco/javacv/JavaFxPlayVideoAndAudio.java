@@ -31,7 +31,6 @@ import org.bytedeco.javacv.JavaFXFrameConverter;
  * @author Jarek Sacha
  */
 public class JavaFxPlayVideoAndAudio extends Application {
-
     private static class PlaybackTimer {
         private long timerStartTimeNanos = -1L;
         private long firstFrameTimestampMicros = -1L;
@@ -39,7 +38,7 @@ public class JavaFxPlayVideoAndAudio extends Application {
         private final SourceDataLine soundLine;
         private boolean timerStarted = false;
         private boolean soundLineClockSuccessfullyUsed = false;
-        private boolean soundLineEverRan = false;
+        private boolean soundLineEverRan = false; // To track if soundline has run at least once
 
         public PlaybackTimer(SourceDataLine soundLine) {
             this.soundLine = soundLine;
@@ -52,6 +51,7 @@ public class JavaFxPlayVideoAndAudio extends Application {
         /**
          * Starts the playback timer. This should be called when the first frame
          * (audio or video) is about to be processed.
+         *
          * @param firstValidFrameTimestampMicros The timestamp of the first frame from the grabber (in microseconds).
          */
         public void start(long firstValidFrameTimestampMicros) {
@@ -143,8 +143,6 @@ public class JavaFxPlayVideoAndAudio extends Application {
         primaryStage.setTitle("JavaFx Video + Audio");
         primaryStage.setScene(scene);
         primaryStage.show();
-
-
         playThread = new Thread(() -> {
             loopIteration = 0;
             FFmpegFrameGrabber grabber = null;
@@ -152,12 +150,10 @@ public class JavaFxPlayVideoAndAudio extends Application {
             final JavaFXFrameConverter converter = new JavaFXFrameConverter();
             final ExecutorService imageExecutor = Executors.newSingleThreadExecutor();
             final ExecutorService audioExecutor = Executors.newSingleThreadExecutor();
-
             PlaybackTimer playbackTimer = null;
             final long maxReadAheadBufferMicros = 700 * 1000L;
             final long videoDelayCapMillis = 1000;
-            final long mainLoopNotReliableSleepCapMillis = 300;
-
+            final long mainLoopNotReliableSleepCapMillis = 200;
             int grabAttemptCounter = 0;
 
             try {
@@ -167,7 +163,6 @@ public class JavaFxPlayVideoAndAudio extends Application {
                 FFmpegLogCallback.set();
                 System.out.println("JavaFxPlayVideoAndAudio: Starting grabber...");
                 grabber.start();
-                // ... (Log grabber info, set stage size) ...
                 System.out.println("JavaFxPlayVideoAndAudio: Grabber started. " +
                         "PixelFormat:" + grabber.getPixelFormat() +
                         ", ImageW/H:" + grabber.getImageWidth() + "/" + grabber.getImageHeight() +
@@ -186,7 +181,7 @@ public class JavaFxPlayVideoAndAudio extends Application {
 
 
                 if (grabber.getAudioChannels() > 0) {
-                    AudioFormat audioFormat = new AudioFormat((float)grabber.getSampleRate(), 16, grabber.getAudioChannels(), true, true);
+                    AudioFormat audioFormat = new AudioFormat((float) grabber.getSampleRate(), 16, grabber.getAudioChannels(), true, true);
                     DataLine.Info info = new DataLine.Info(SourceDataLine.class, audioFormat);
                     localSoundLine = (SourceDataLine) AudioSystem.getLine(info);
                     int bytesPerFrame = audioFormat.getFrameSize();
@@ -233,12 +228,18 @@ public class JavaFxPlayVideoAndAudio extends Application {
                                 try {
                                     ShortBuffer samples = (ShortBuffer) audioFrameToWarm.samples[0];
                                     ByteBuffer outBuffer = ByteBuffer.allocate(samples.capacity() * 2);
-                                    for (int i = 0; i < samples.capacity(); i++) outBuffer.putShort(samples.get(i));
+                                    for (int i = 0; i < samples.capacity(); i++)
+                                        outBuffer.putShort(samples.get(i));
                                     finalSoundLine.write(outBuffer.array(), 0, outBuffer.capacity());
                                 } catch (Exception e) { /* log */ }
                             });
                         }
-                        try { Thread.sleep(15); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                        try {
+                            Thread.sleep(5);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
                         if (finalPlaybackTimer.isAudioClockActive()) { // Check using the new method
                             System.out.println("JavaFxPlayVideoAndAudio: [Warmup] Audio clock ACTIVE after " + (warmupIter + 1) + " frames.");
                             break;
@@ -250,7 +251,6 @@ public class JavaFxPlayVideoAndAudio extends Application {
                         System.err.println("JavaFxPlayVideoAndAudio: --- Audio Warm-up: Audio Clock DID NOT become active. ---");
                     }
                 }
-                // --- END AUDIO WARM-UP ---
 
                 System.out.println("JavaFxPlayVideoAndAudio: Starting main processing loop with RELATIVE synchronization...");
 
@@ -260,7 +260,9 @@ public class JavaFxPlayVideoAndAudio extends Application {
                     Frame frame = null;
                     try {
                         frame = grabber.grab();
-                    } catch (FrameGrabber.Exception e) { break; }
+                    } catch (FrameGrabber.Exception e) {
+                        break;
+                    }
 
                     if (frame == null) {
                         System.err.println("JavaFxPlayVideoAndAudio: [Iter " + loopIteration + "] Grabber returned NULL. Ending loop.");
@@ -271,11 +273,8 @@ public class JavaFxPlayVideoAndAudio extends Application {
                         System.out.println("JavaFxPlayVideoAndAudio: [MainLoop, Iter " + loopIteration + "] First frame for timer (TS_abs: " + frame.timestamp + "us). Starting PlaybackTimer.");
                         finalPlaybackTimer.start(frame.timestamp);
                     }
-
-                    // All frame timestamps are relative to the first frame's timestamp
                     final long currentFrameRelativeTimestampMicros = frame.timestamp - finalPlaybackTimer.getFirstFrameTimestampMicros();
                     final long currentPlaybackTimeMicros = finalPlaybackTimer.elapsedMicros();
-
                     boolean hasImage = (frame.image != null && frame.image[0] != null);
                     boolean hasAudio = (frame.samples != null && frame.samples[0] != null);
 
@@ -290,24 +289,20 @@ public class JavaFxPlayVideoAndAudio extends Application {
                     // --- IMAGE PROCESSING ---
                     if (hasImage) {
                         final Frame imageFrameToConvert = frame.clone();
-                        // Pass relative timestamp for image processing decisions
                         final long imageFrameRelativeTs = currentFrameRelativeTimestampMicros;
                         imageExecutor.submit(() -> {
                             try {
                                 long playbackTimeAtRenderDecision = finalPlaybackTimer.elapsedMicros();
                                 long delayNeededMicros = imageFrameRelativeTs - playbackTimeAtRenderDecision;
                                 long sleepMillis = 0;
-
-                                if (delayNeededMicros > 1000) { // If frame is more than 1ms ahead
+                                if (delayNeededMicros > 1000) {
                                     sleepMillis = delayNeededMicros / 1000;
-                                    // If audio clock isn't active, we might be using System time which can drift. Cap sleep.
                                     if (!finalPlaybackTimer.isAudioClockActive() && sleepMillis > videoDelayCapMillis) {
                                         System.err.println("[ImageExec] Audio clock not active. Video sleep " + sleepMillis + "ms for RelTS:" + imageFrameRelativeTs + " too long. Capping to " + videoDelayCapMillis + "ms.");
                                         sleepMillis = videoDelayCapMillis;
                                     }
-                                    // Even if audio clock is active, if elapsed time is small, cap it.
                                     else if (finalPlaybackTimer.isAudioClockActive() && playbackTimeAtRenderDecision < 1500000 && sleepMillis > 300) {
-                                        System.err.println("[ImageExec] Audio clock active but elapsed small ("+playbackTimeAtRenderDecision+"us). Video sleep " + sleepMillis + "ms for RelTS:" + imageFrameRelativeTs + ". Capping to 300ms.");
+                                        System.err.println("[ImageExec] Audio clock active but elapsed small (" + playbackTimeAtRenderDecision + "us). Video sleep " + sleepMillis + "ms for RelTS:" + imageFrameRelativeTs + ". Capping to 300ms.");
                                         sleepMillis = 300;
                                     }
                                 }
@@ -317,8 +312,9 @@ public class JavaFxPlayVideoAndAudio extends Application {
                                 if (fxImage != null) {
                                     Platform.runLater(() -> imageView.setImage(fxImage));
                                 }
-                            } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                            catch (Exception e) { /* log error */ }
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            } catch (Exception e) { /* log error */ }
                         });
                     }
 
@@ -329,46 +325,49 @@ public class JavaFxPlayVideoAndAudio extends Application {
                             try {
                                 ShortBuffer samples = (ShortBuffer) audioFrame.samples[0];
                                 ByteBuffer outBuffer = ByteBuffer.allocate(samples.capacity() * 2);
-                                for (int i = 0; i < samples.capacity(); i++) outBuffer.putShort(samples.get(i));
+                                for (int i = 0; i < samples.capacity(); i++)
+                                    outBuffer.putShort(samples.get(i));
                                 finalSoundLine.write(outBuffer.array(), 0, outBuffer.capacity());
                             } catch (Exception e) { /* log */ }
                         });
                     }
                     long mainLoopSleepMillis = 0;
                     long frameAheadOfPlaybackMicros = currentFrameRelativeTimestampMicros - currentPlaybackTimeMicros;
-
                     if (frameAheadOfPlaybackMicros > maxReadAheadBufferMicros) {
                         mainLoopSleepMillis = (frameAheadOfPlaybackMicros - maxReadAheadBufferMicros) / 1000;
-
                         if (!finalPlaybackTimer.isAudioClockActive() && mainLoopSleepMillis > mainLoopNotReliableSleepCapMillis) {
                             System.err.println("[MainLoop] Audio clock not active. Main sleep " + mainLoopSleepMillis + "ms too long. Capping to " + mainLoopNotReliableSleepCapMillis + "ms.");
                             mainLoopSleepMillis = mainLoopNotReliableSleepCapMillis;
                         }
                         // Similar cap if audio clock is active but elapsed time is still small
                         else if (finalPlaybackTimer.isAudioClockActive() && currentPlaybackTimeMicros < 1500000 && mainLoopSleepMillis > 300) {
-                            System.err.println("[MainLoop] Audio clock active but elapsed small ("+currentPlaybackTimeMicros+"us). Main sleep " + mainLoopSleepMillis + "ms. Capping to 300ms.");
+                            System.err.println("[MainLoop] Audio clock active but elapsed small (" + currentPlaybackTimeMicros + "us). Main sleep " + mainLoopSleepMillis + "ms. Capping to 300ms.");
                             mainLoopSleepMillis = 300;
                         }
                     }
-
                     if (mainLoopSleepMillis > 5) {
-                        System.out.println("[MainLoop] Sleeping for " + mainLoopSleepMillis + "ms. FrameRelTS:" + currentFrameRelativeTimestampMicros + ", PlaybackTime:" + currentPlaybackTimeMicros +", AudioClockActive:"+finalPlaybackTimer.isAudioClockActive());
+                        System.out.println("[MainLoop] Sleeping for " + mainLoopSleepMillis + "ms. FrameRelTS:" + currentFrameRelativeTimestampMicros + ", PlaybackTime:" + currentPlaybackTimeMicros + ", AudioClockActive:" + finalPlaybackTimer.isAudioClockActive());
                         Thread.sleep(mainLoopSleepMillis);
                     }
                 }
-
                 System.out.println("JavaFxPlayVideoAndAudio: ***** Main processing loop finished *****");
-
             } catch (Exception e) {
                 LOG.log(Level.SEVERE, "Error in playback thread", e);
                 e.printStackTrace();
             } finally {
                 System.out.println("JavaFxPlayVideoAndAudio: Entering finally block for cleanup...");
                 if (grabber != null) {
-                    try { grabber.stop(); grabber.release(); } catch (Exception e) { LOG.log(Level.WARNING, "Error stopping grabber", e); }
+                    try {
+                        grabber.stop();
+                        grabber.release();
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "Error stopping grabber", e);
+                    }
                 }
-                if (localSoundLine != null) {
-                    localSoundLine.drain(); localSoundLine.stop(); localSoundLine.close();
+                if (localSoundLine != null) { /* ... drain, stop, close ... */
+                    localSoundLine.drain();
+                    localSoundLine.stop();
+                    localSoundLine.close();
                 }
                 shutdownExecutor(audioExecutor, "AudioExecutor");
                 shutdownExecutor(imageExecutor, "ImageExecutor");
@@ -379,8 +378,6 @@ public class JavaFxPlayVideoAndAudio extends Application {
         playThread.setName("JavaFX-RelativeSync-Thread");
         playThread.start();
     }
-
-
     private void shutdownExecutor(ExecutorService executor, String name) {
         if (executor != null && !executor.isShutdown()) {
             System.out.println("JavaFxPlayVideoAndAudio: Shutting down " + name + "...");
@@ -388,24 +385,28 @@ public class JavaFxPlayVideoAndAudio extends Application {
             try {
                 if (!executor.awaitTermination(2, TimeUnit.SECONDS)) {
                     executor.shutdownNow();
-                    if (!executor.awaitTermination(2, TimeUnit.SECONDS)) System.err.println(name + " did not terminate.");
+                    if (!executor.awaitTermination(2, TimeUnit.SECONDS))
+                        System.err.println(name + " did not terminate.");
                 } else {
                     System.out.println("JavaFxPlayVideoAndAudio: " + name + " shut down gracefully.");
                 }
             } catch (InterruptedException ie) {
-                executor.shutdownNow(); Thread.currentThread().interrupt();
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
             }
         }
     }
 
-
     @Override
     public void stop() throws Exception {
-        // ... (Same stop method as before) ...
         System.out.println("JavaFxPlayVideoAndAudio: Application stop() called.");
         if (playThread != null) {
             playThread.interrupt();
-            try { playThread.join(5000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            try {
+                playThread.join(5000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
         Platform.exit();
         System.out.println("JavaFxPlayVideoAndAudio: Application stop() finished.");

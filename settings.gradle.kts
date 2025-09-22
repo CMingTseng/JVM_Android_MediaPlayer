@@ -78,6 +78,9 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "JVM_Android_MediaPlayer"
+include(":shared")
+include(":desktop:swing")
+project(":desktop:swing").projectDir = file("./desktop/swing")
 include(":desktop:JavaFX")
 project(":desktop:JavaFX").projectDir = file("./desktop/JavaFx")
 

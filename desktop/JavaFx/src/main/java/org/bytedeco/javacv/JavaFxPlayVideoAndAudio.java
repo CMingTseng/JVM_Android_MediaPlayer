@@ -1,13 +1,6 @@
 package org.bytedeco.javacv;
 
-import java.nio.ByteBuffer;
-import java.nio.ShortBuffer;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
-import java.util.logging.Level;
 import java.util.logging.Logger;
-
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Scene;
@@ -16,16 +9,6 @@ import javafx.scene.image.ImageView;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 
-import javax.sound.sampled.AudioFormat;
-import javax.sound.sampled.AudioSystem;
-import javax.sound.sampled.DataLine;
-import javax.sound.sampled.LineUnavailableException;
-import javax.sound.sampled.SourceDataLine;
-
-import org.bytedeco.javacv.FFmpegFrameGrabber;
-import org.bytedeco.javacv.Frame;
-import org.bytedeco.javacv.JavaFXFrameConverter;
-
 /**
  * @author Dmitriy Gerashenko <d.a.gerashenko@gmail.com>
  * @author Jarek Sacha
@@ -33,12 +16,10 @@ import org.bytedeco.javacv.JavaFXFrameConverter;
 public class JavaFxPlayVideoAndAudio extends Application {
 
     private static final Logger LOG = Logger.getLogger(JavaFxPlayVideoAndAudio.class.getName());
-
-    private  BytedecoFFmpegPlayer player;
-
+    private BytedecoFFmpegPlayer player;
+    private ImageView imageView;
 
     public static void main(String[] args) {
-        // FFmpegLogCallback.set(); // If you use FFmpegLogCallback, set it up here once globally
         launch(args);
     }
 
@@ -46,70 +27,72 @@ public class JavaFxPlayVideoAndAudio extends Application {
     public void start(final Stage primaryStage) {
         System.out.println("JavaFxPlayVideoAndAudio: Application start() method.");
         final StackPane root = new StackPane();
-        final ImageView imageView = new ImageView(); // Initialize ImageView
+        imageView = new ImageView();
         root.getChildren().add(imageView);
-
-        // Configure ImageView properties
         imageView.setPreserveRatio(true);
         imageView.fitWidthProperty().bind(root.widthProperty());
         imageView.fitHeightProperty().bind(root.heightProperty());
 
-        final Scene scene = new Scene(root, 640, 480); // Initial size, player might resize
-        primaryStage.setTitle("JavaFx Video + Audio Player (Refactored)");
+        final Scene scene = new Scene(root, 640, 480);
+        primaryStage.setTitle("JavaFx Video + Audio Player (Further Refactored)");
         primaryStage.setScene(scene);
         primaryStage.show();
 
         // --- Instantiate and use BytedecoFFmpegPlayer ---
         player = new BytedecoFFmpegPlayer(
-                // VideoFrameCallback: Handles displaying the image on the UI thread
-                (fxImage, relativeTimestampMicros) -> {
-                    if (fxImage != null) {
-                        Platform.runLater(() -> {
-                            if (imageView != null) { // Ensure imageView is still valid
-                                imageView.setImage(fxImage);
-                            }
-                        });
+                // VideoFrameCallback: Receives raw org.bytedeco.javacv.Frame
+                (rawVideoFrame, relativeTimestampMicros) -> {
+                    if (rawVideoFrame != null && rawVideoFrame.image != null) {
+                        // Convert the raw Frame to JavaFX Image here
+                        // IMPORTANT: The rawVideoFrame in the callback might be reused by the player.
+                        // The player internally clones it before submitting to the imageProcessingExecutor,
+                        // and that clone is closed by the executor. So, direct use here within this
+                        // callback scope *should* be okay IF the callback is lightweight and synchronous.
+                        // If this callback itself were to do heavy async work with rawVideoFrame,
+                        // it would need to clone it again.
+                        // However, the player's provided rawVideoFrame to onFrame is already a clone
+                        // specifically for this callback's processing thread.
+
+                        Image fxImage = FrameConverter.convert(rawVideoFrame);
+                        if (fxImage != null) {
+                            Platform.runLater(() -> {
+                                if (imageView != null) {
+                                    imageView.setImage(fxImage);
+                                }
+                            });
+                        }
                     } else {
-                        // This case might happen if converter returns null
-                        // System.err.println("JavaFxPlayVideoAndAudio: Received null fxImage from player callback.");
+                        // System.err.println("JavaFxPlayVideoAndAudio: Received null or imageless rawFrame from player callback.");
                     }
+                },
+                // Optional AudioDataCallback (remains the same if used)
+                null, // Or your audio callback: (samples, lineToWriteTo, originalFrame) -> { /* ... */ }
+                // PlayerEventCallback: Handles events like video dimensions
+                (width, height) -> {
+                    Platform.runLater(() -> {
+                        System.out.println("JavaFxPlayVideoAndAudio: Video dimensions detected by player: " + width + "x" + height);
+                        if (primaryStage != null && width > 0 && height > 0) {
+                            primaryStage.setWidth(width);
+                            // Add some extra height for title bar, etc. as in original code
+                            primaryStage.setHeight(height + 40);
+                        }
+                    });
                 }
-                // Optional: Provide an AudioDataCallback for custom audio handling or visualization
-                // For this example, we'll let BytedecoFFmpegPlayer handle audio internally.
-            /*
-            , (samples, lineToWriteTo, originalFrame) -> {
-                // Example: Custom audio processing if needed
-                // System.out.println("AudioDataCallback: Received audio samples. Buffer capacity: " + samples.capacity());
-                // try {
-                //     ByteBuffer outBuffer = ByteBuffer.allocate(samples.capacity() * 2);
-                //     for (int i = 0; i < samples.capacity(); i++)
-                //         outBuffer.putShort(samples.get(i));
-                //     lineToWriteTo.write(outBuffer.array(), 0, outBuffer.capacity());
-                // } catch (Exception e) {
-                //     LOG.log(Level.WARNING, "Error in custom audio callback", e);
-                // }
-            }
-            */
         );
 
-        // final String videoFilename = "path/to/your/video.mp4"; // Replace with your video file or URL
         final String videoFilename = "https://github.com/rambod-rahmani/ffmpeg-video-player/raw/refs/heads/master/Iron_Man-Trailer_HD.mp4";
         System.out.println("JavaFxPlayVideoAndAudio: Starting player with file: " + videoFilename);
-        player.start(videoFilename, primaryStage); // Pass primaryStage for potential resize
+        // Player no longer takes Stage directly
+        player.start(videoFilename);
     }
 
     @Override
     public void stop() throws Exception {
         System.out.println("JavaFxPlayVideoAndAudio: Application stop() called.");
         if (player != null) {
-            player.stop(); // Gracefully stop the player
+            player.stop();
         }
-        // Platform.exit(); // Usually not needed, JavaFX handles this when last window closes.
-        // If you must force exit, consider System.exit(0) after ensuring player cleanup.
         System.out.println("JavaFxPlayVideoAndAudio: Application stop() finished.");
-        // Explicitly call Platform.exit() if the application doesn't close otherwise,
-        // for example, if there are non-daemon threads still running that aren't managed by the player.
-        // However, the player's thread is a daemon thread.
-        Platform.exit(); // Ensure JavaFX platform shuts down.
+        Platform.exit();
     }
 }

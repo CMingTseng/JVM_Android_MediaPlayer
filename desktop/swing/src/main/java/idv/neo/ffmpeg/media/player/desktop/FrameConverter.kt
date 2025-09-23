@@ -11,7 +11,11 @@ import java.nio.ByteOrder
 
 object FrameConverter {
 
-    fun converDirectToBufferedImage(frame: Frame, actualFramePixelFormat: Int): BufferedImage? {
+    fun convert(frame: Frame, actualFramePixelFormat: Int): BufferedImage? {
+        return convertDirectToBufferedImage(frame, actualFramePixelFormat)
+    }
+
+    private fun convertDirectToBufferedImage(frame: Frame, actualFramePixelFormat: Int): BufferedImage? {
         val functionStartTimeNs = System.nanoTime() // Record start time
 
         if (frame.imageWidth <= 0 || frame.imageHeight <= 0 || frame.image == null || frame.image[0] == null) {

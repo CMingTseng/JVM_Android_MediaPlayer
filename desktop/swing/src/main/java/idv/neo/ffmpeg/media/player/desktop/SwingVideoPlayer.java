@@ -266,7 +266,7 @@ public class SwingVideoPlayer {
 
                                 if (Thread.currentThread().isInterrupted()) return;
 
-                                BufferedImage bImage = FrameConverter.INSTANCE.converDirectToBufferedImage(imageFrameForProcessing, finalActualPixelFormat);
+                                BufferedImage bImage = FrameConverter.INSTANCE.convert(imageFrameForProcessing, finalActualPixelFormat);
                                 if (bImage != null) {
                                     // Update on EDT
                                     SwingUtilities.invokeLater(() -> videoPanel.updateImage(bImage));

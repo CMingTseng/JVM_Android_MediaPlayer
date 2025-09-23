@@ -1,39 +1,35 @@
 package idv.neo.ffmpeg.media.player.ui
 
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import idv.neo.ffmpeg.media.player.core.FrameConverter
+import idv.neo.ffmpeg.media.player.core.utils.getPixelFormatName
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable.isActive
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.coroutineScope
-import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
+import org.bytedeco.javacv.FFmpegFrameGrabber
+import org.bytedeco.javacv.Frame
 import java.nio.ShortBuffer
 import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.DataLine
+import javax.sound.sampled.LineUnavailableException
 import javax.sound.sampled.SourceDataLine
 import kotlin.coroutines.cancellation.CancellationException
-import androidx.lifecycle.viewModelScope
-import idv.neo.ffmpeg.media.player.core.convertToImageBitmap
-import kotlinx.coroutines.NonCancellable.isActive
-import org.bytedeco.javacv.FFmpegFrameGrabber
-import org.bytedeco.javacv.Frame
-import java.nio.ByteBuffer
-import javax.sound.sampled.LineUnavailableException
 
 class MainViewModel : ViewModel() {
-    private val _countdownValue = MutableStateFlow(10)
+    private val _countdownValue = MutableStateFlow(10) // Initial countdown value
     val countdownValue: StateFlow<Int> = _countdownValue.asStateFlow()
     private val _videoFrameBitmap = MutableStateFlow<ImageBitmap?>(null)
     val videoFrameBitmap: StateFlow<ImageBitmap?> = _videoFrameBitmap.asStateFlow()
@@ -238,26 +234,18 @@ class MainViewModel : ViewModel() {
                                 println("SVM: [ImageProc $imageFrameRelativeTs] Coroutine no longer active after delay.")
                                 return@launch
                             }
-                            if (frame.imageWidth <= 0 || frame.imageHeight <= 0 || frame.image == null || frame.image[0] == null) {
 
-                            }else{
-                                val width = frame.imageWidth
-                                val height = frame.imageHeight
-                                val imageStride = frame.imageStride
-                                val imageDepth = frame.imageDepth
-                                val imageChannels = frame.imageChannels
-                                val imageBuffer = frame.image[0] as ByteBuffer
-                                val bitmap =  convertToImageBitmap(width,height,imageStride,imageDepth,imageChannels,imageBuffer, actualGrabberPixelFormat)
-                                if (bitmap != null) {
-                                    if (isActive) {
-                                        withContext(Dispatchers.Main) {
-                                            _videoFrameBitmap.value = bitmap
+                            val bitmap = FrameConverter.convertToImageBitmap(imageFrameForProcessing, actualGrabberPixelFormat)
 
-                                        }
+                            if (bitmap != null) {
+                                if (isActive) {
+                                    withContext(Dispatchers.Main) {
+                                        _videoFrameBitmap.value = bitmap
+
                                     }
-                                } else {
-                                    println("SVM: [ImageProc $imageFrameRelativeTs] Skia conversion failed. No bitmap to display.")
                                 }
+                            } else {
+                                println("SVM: [ImageProc $imageFrameRelativeTs] Skia conversion failed. No bitmap to display.")
                             }
                         }
                     }
@@ -351,8 +339,7 @@ class MainViewModel : ViewModel() {
             println("SVM: Attempting to start grabber for: $videoUrl")
             grabber!!.start()
             actualGrabberPixelFormat = grabber!!.pixelFormat
-            //FIXME
-//            println("SVM: Grabber started. Format:${getPixelFormatName(actualGrabberPixelFormat)}, Size:${grabber!!.imageWidth}x${grabber!!.imageHeight}, FPS:${grabber!!.frameRate}")
+            println("SVM: Grabber started. Format:${getPixelFormatName(actualGrabberPixelFormat)}, Size:${grabber!!.imageWidth}x${grabber!!.imageHeight}, FPS:${grabber!!.frameRate}")
             println("SVM: Audio: Ch:${grabber!!.audioChannels}, Rate:${grabber!!.sampleRate}, Codec:${grabber!!.audioCodecName ?: "N/A"}")
 
             if (grabber!!.audioChannels > 0) {

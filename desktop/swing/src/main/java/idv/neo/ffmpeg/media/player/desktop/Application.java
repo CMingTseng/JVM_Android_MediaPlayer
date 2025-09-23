@@ -6,97 +6,137 @@ import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 
-public class Application {
+import org.bytedeco.javacv.Frame;
+import org.bytedeco.javacv.JavaFxSwingFFmpegPlayer;
+// Import the new UniversalFrameConverter, adjust package if it's different
+import org.bytedeco.javacv.UniversalFrameConverter;
 
-    private static JTextField videoUrlField; // UI component for URL input
-    private static SwingVideoPlayer player; // Player instance
-    private static JButton playButton;       // Play button
+
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.ActionEvent;
+import java.awt.event.ActionListener;
+import java.awt.image.BufferedImage;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+public class Application {
+    private static final Logger LOG_UI = Logger.getLogger(Application.class.getName() + ".UI");
+
+    private static JTextField videoUrlField;
+    private static JavaFxSwingFFmpegPlayer player;
+    private static PlayerSurface playerSurface;
+    private static JButton playButton;
+    private static JFrame frame;
+    private static volatile int currentFramePixelFormat = -1; // To store pixel format for converter
 
     public static void main(String[] args) {
+        System.setProperty("java.util.logging.SimpleFormatter.format",
+                "[%1$tF %1$tT] [%4$-7s] %5$s %n");
         SwingUtilities.invokeLater(Application::createAndShowGUI);
     }
 
     private static void createAndShowGUI() {
-        JFrame frame = new JFrame("Swing Video Player");
+        frame = new JFrame("Generic Player with Swing UI (Universal Player)");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setMinimumSize(new Dimension(600, 400)); // Set a minimum size
+        frame.setMinimumSize(new Dimension(600, 400));
 
-        // --- Video Display Panel ---
-        final PlayerSurface videoPanel = new PlayerSurface();
-        videoPanel.setPreferredSize(new Dimension(640, 480));
-        frame.getContentPane().add(videoPanel, BorderLayout.CENTER);
+        playerSurface = new PlayerSurface();
+        playerSurface.setPreferredSize(new Dimension(640, 480));
+        frame.getContentPane().add(playerSurface, BorderLayout.CENTER);
 
-        // Initialize the player
-        player = new SwingVideoPlayer(videoPanel);
+        JavaFxSwingFFmpegPlayer.Builder playerBuilder = new JavaFxSwingFFmpegPlayer.Builder(
+                (videoFrame, relativeTimestampMicros) -> { // VideoFrameOutputCallback
+                    if (videoFrame != null) {
+                        // Pass the stored/updated pixel format
+                        BufferedImage swingImage = UniversalFrameConverter.convertToBufferedImage(videoFrame, currentFramePixelFormat);
+                        if (swingImage != null) {
+                            playerSurface.updateImage(swingImage);
+                        }
+                    }
+                },
+                new JavaFxSwingFFmpegPlayer.PlayerEventCallback() {
+                    @Override
+                    public void onVideoDimensionsDetected(int width, int height, int pixelFormat) { // Receive pixelFormat
+                        LOG_UI.info("Video dimensions detected: " + width + "x" + height + ", PixelFormat Value: " + pixelFormat);
+                        Application.currentFramePixelFormat = pixelFormat; // Store it for use by the converter
+                        // Optional: Log the name of the pixel format if you have a utility for it
+                        // LOG_UI.info("Pixel Format Name: " + YourPixelFormatUtils.getFormatName(pixelFormat));
 
-        // --- Control Panel ---
-        JPanel controlPanel = new JPanel(new BorderLayout()); // Use BorderLayout for more structure
+                        SwingUtilities.invokeLater(() -> {
+                            // UI updates if needed based on dimensions
+                        });
+                    }
 
-        // Input Panel for URL
+                    @Override
+                    public void onPlaybackStarted() {
+                        LOG_UI.info("Playback started.");
+                        // The pixel format should ideally be known by now from onVideoDimensionsDetected.
+                        // So, the original logic trying to get grabber instance here is no longer needed.
+                        SwingUtilities.invokeLater(() -> {
+                            playButton.setText("Playing...");
+                            playButton.setEnabled(false);
+                            videoUrlField.setEnabled(false);
+                        });
+                    }
+
+                    @Override
+                    public void onEndOfMedia() {
+                        LOG_UI.info("End of media reached.");
+                        SwingUtilities.invokeLater(() -> {
+                            playButton.setText("Play Video");
+                            playButton.setEnabled(true);
+                            videoUrlField.setEnabled(true);
+                            Application.currentFramePixelFormat = -1; // Reset pixel format
+                        });
+                    }
+
+                    @Override
+                    public void onError(String errorMessage, Exception e) {
+                        LOG_UI.log(Level.SEVERE, "Player Error: " + errorMessage, e);
+                        SwingUtilities.invokeLater(() -> {
+                            JOptionPane.showMessageDialog(frame,
+                                    errorMessage + (e != null ? "\n" + e.getMessage() : ""),
+                                    "Playback Error", JOptionPane.ERROR_MESSAGE);
+                            playButton.setText("Play Video");
+                            playButton.setEnabled(true);
+                            videoUrlField.setEnabled(true);
+                            Application.currentFramePixelFormat = -1; // Reset pixel format
+                        });
+                    }
+                }
+        );
+
+        player = playerBuilder.build();
+
+        JPanel controlPanel = new JPanel(new BorderLayout());
         JPanel inputPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         inputPanel.add(new JLabel("Video URL:"));
         videoUrlField = new JTextField(40);
-//        videoUrlField.setText("https://github.com/rambod-rahmani/ffmpeg-video-player/raw/refs/heads/master/Iron_Man-Trailer_HD.mp4"); // Default URL
-        videoUrlField.setText("https://video-tx-aws.langhongtw.com/live/6185039Y.flv"); // Default URL
+        videoUrlField.setText("https://github.com/rambod-rahmani/ffmpeg-video-player/raw/refs/heads/master/Iron_Man-Trailer_HD.mp4");
         inputPanel.add(videoUrlField);
+        controlPanel.add(inputPanel, BorderLayout.NORTH);
 
-        controlPanel.add(inputPanel, BorderLayout.NORTH); // Add input panel to the top of control panel
-
-        // Button Panel for Play button
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER));
         playButton = new JButton("Play Video");
         buttonPanel.add(playButton);
+        controlPanel.add(buttonPanel, BorderLayout.CENTER);
+        frame.getContentPane().add(controlPanel, BorderLayout.SOUTH);
 
-        controlPanel.add(buttonPanel, BorderLayout.CENTER); // Add button panel to the center of control panel
-
-        frame.getContentPane().add(controlPanel, BorderLayout.SOUTH); // Add control panel to the bottom of the frame
-
-        // --- Action Listener for Play Button ---
-        playButton.addActionListener(new ActionListener() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                String videoUrl = videoUrlField.getText().trim(); // Get URL and trim whitespace
-
-                if (videoUrl.isEmpty()) {
-                    JOptionPane.showMessageDialog(frame,
-                            "Please enter a video URL.",
-                            "URL Missing",
-                            JOptionPane.WARNING_MESSAGE);
-                    return; // Do nothing if URL is empty
-                }
-
-                // It's good practice to disable the button while attempting to start
-                playButton.setEnabled(false);
-                videoUrlField.setEnabled(false); // Optionally disable URL field during playback attempt
-
-                // Start streaming in a new thread so the button action listener returns quickly
-                new Thread(() -> {
-                    try {
-                        player.startStreaming(videoUrl);
-                    } catch (Exception ex) {
-                        // Log error or show a message to the user
-                        System.err.println("Error starting stream: " + ex.getMessage());
-                        ex.printStackTrace();
-                        SwingUtilities.invokeLater(() -> {
-                            JOptionPane.showMessageDialog(frame,
-                                    "Error starting stream: " + ex.getMessage(),
-                                    "Playback Error",
-                                    JOptionPane.ERROR_MESSAGE);
-                        });
-                    } finally {
-                        // Re-enable UI components on the EDT after streaming attempt (success or fail)
-                        SwingUtilities.invokeLater(() -> {
-                            playButton.setEnabled(true);
-                            videoUrlField.setEnabled(true);
-                        });
-                    }
-                }).start();
+        playButton.addActionListener(e -> {
+            String videoUrl = videoUrlField.getText().trim();
+            if (videoUrl.isEmpty()) {
+                JOptionPane.showMessageDialog(frame, "Please enter a video URL.", "URL Missing", JOptionPane.WARNING_MESSAGE);
+                return;
             }
+            LOG_UI.info("Play button clicked. URL: " + videoUrl);
+            playButton.setEnabled(false);
+            videoUrlField.setEnabled(false);
+            player.start(videoUrl); // Player is async
         });
 
-        // Display the window
-        frame.pack(); // Adjust window size to fit components
-        frame.setLocationRelativeTo(null); // Center the window
+        frame.pack();
+        frame.setLocationRelativeTo(null);
         frame.setVisible(true);
     }
 }

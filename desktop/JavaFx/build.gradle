@@ -30,7 +30,8 @@ application {
 
 dependencies {
     implementation(libs.org.bytedeco.ffmpeg.platform.gpl)
-    implementation(libs.org.bytedeco.javacv.platform)//FFmpegFrameGrabber Frame JavaFXFrameConverter
+    implementation(libs.org.bytedeco.javacv.platform)
+    implementation project(':shared')//FFmpegFrameGrabber Frame JavaFXFrameConverter
 //    implementation(libs.org.bytedeco.opencv.platform.gpu)
     testImplementation(libs.kotlin.testJunit)
 }

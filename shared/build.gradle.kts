@@ -1,3 +1,4 @@
+import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -21,7 +22,14 @@ java {
 }
 
 kotlin {
-    jvm()
+    jvm(){
+        @OptIn(ExperimentalKotlinGradlePluginApi::class)
+        compilations.all {
+            compilerOptions.configure {
+                jvmTarget.set(JvmTarget.JVM_11)
+            }
+        }
+    }
     androidTarget {
         compilations.all {
             compileTaskProvider.configure {
@@ -48,10 +56,6 @@ kotlin {
             implementation(libs.jetbrains.androidx.lifecycle.runtime.compose)
 
 //            implementation(projects.core)
-
-            implementation(libs.org.bytedeco.javacv.platform)
-            implementation(libs.org.bytedeco.opencv.platform.gpu)
-            implementation(libs.org.bytedeco.ffmpeg.platform.gpl)
         }
 
         commonTest.dependencies {
@@ -62,13 +66,20 @@ kotlin {
             api(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutines.swing)
             implementation(libs.org.bytedeco.javacv.platform)
-            implementation(libs.org.bytedeco.opencv.platform.gpu)
             implementation(libs.org.bytedeco.ffmpeg.platform.gpl)
+//            implementation(libs.org.bytedeco.opencv.platform.gpu)
+
+            val javafxVersion = "17.0.10" // Or use a variable from gradle.properties or libs.versions.toml
+            implementation("org.openjfx:javafx-graphics:${javafxVersion}:win") // Example for Windows
+            implementation("org.openjfx:javafx-graphics:${javafxVersion}:mac")  // Example for macOS (Intel)
+            implementation("org.openjfx:javafx-graphics:${javafxVersion}:mac-aarch64")  // Example for macOS (Apple Silicon)
+            implementation("org.openjfx:javafx-graphics:${javafxVersion}:linux")
+
         }
         androidMain.dependencies {
             implementation(libs.org.bytedeco.javacv.platform)
-            implementation(libs.org.bytedeco.opencv.platform.gpu)
             implementation(libs.org.bytedeco.ffmpeg.platform.gpl)
+//            implementation(libs.org.bytedeco.opencv.platform.gpu)
         }
     }
 }

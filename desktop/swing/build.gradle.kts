@@ -28,6 +28,7 @@ dependencies {
     implementation(libs.org.bytedeco.javacv.platform)
     implementation(libs.org.bytedeco.ffmpeg.platform.gpl)
     implementation(project(":shared"))
+    implementation(project(":shared"))
 //    implementation(libs.org.bytedeco.opencv.platform.gpu)
     testImplementation(libs.kotlin.testJunit)
 }

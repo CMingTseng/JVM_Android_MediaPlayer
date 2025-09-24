@@ -3,31 +3,26 @@ package org.bytedeco.javacv
 import kotlinx.coroutines.*
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.Frame
-import org.bytedeco.javacv.FrameGrabber
 import java.io.Closeable
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
 import java.nio.ShortBuffer
 import java.util.concurrent.Executors
 import java.util.logging.Level
 import java.util.logging.Logger
 import javax.sound.sampled.*
-import kotlin.math.abs
 import kotlin.math.min
-import kotlin.text.format
 
-// Type aliases for cleaner callback definitions in Kotlin
+// Type aliases and PlayerEvent remain the same
 typealias VideoFrameOutputCallback = (videoFrame: Frame, relativeTimestampMicros: Long) -> Unit
 typealias AudioDataOutputCallback = (samples: ShortBuffer, lineToWriteTo: SourceDataLine, originalFrame: Frame) -> Unit
 typealias PlayerEventCallback = (event: PlayerEvent) -> Unit
 
-// Sealed interface for player events to provide more type-safe event handling
 sealed interface PlayerEvent {
     data class VideoDimensionsDetected(val width: Int, val height: Int, val pixelFormat: Int, val frameRate: Double) : PlayerEvent
     data object PlaybackStarted : PlayerEvent
     data object EndOfMedia : PlayerEvent
-    data class Error(val errorMessage: String, val exception: Exception) : PlayerEvent
+    data class Error(val errorMessage: String, val exception: Exception?) : PlayerEvent
 }
 
 class JavaFxSwingComposeFFmpegPlayer @JvmOverloads constructor(
@@ -47,24 +42,52 @@ class JavaFxSwingComposeFFmpegPlayer @JvmOverloads constructor(
 
     private var grabber: FFmpegFrameGrabber? = null
     private var localSoundLine: SourceDataLine? = null
-    private var playbackTimer: PlaybackTimer? = null
 
-    // Configuration properties
+    @Volatile private var firstValidFrameTimestampMicros: Long = -1L
+    @Volatile private var systemTimeAnchorNanos: Long = -1L
+    @Volatile private var isMediaClockInitialized: Boolean = false
+
+    // Configuration from your _old.kt
     private val maxReadAheadBufferMicros = 700 * 1000L
-    private val videoTargetDelayToleranceMicros = 30 * 1000L
-    private val videoMaxSleepMs = 100L
-    private val mainLoopDelayCapMillisUnreliableTimer = 100L
-    private val generalMaxSleepMillis = 500L
-    private val minMeaningfulVideoDelayMs = 5L
-    private val experimentalPollingIntervalsMs = listOf(600L, 800L, 1000L, 1200L, 1500L, 2000L, 2500L, 3000L, 3000L, 3000L) // Total approx 18.6s
+    private val videoMaxSleepMsIfEarly = 100L // Renamed from videoMaxSleepMs
+    private val videoCatchUpDropThresholdMicros = 200 * 1000L // From your _old.kt
+    private val minMeaningfulSleepMs = 5L      // Renamed from minMeaningfulVideoDelayMs
+
+    // Polling intervals from your _old.kt (experimentalPollingIntervalsMs)
+    private val pollingIntervalsMs = listOf(600L, 800L, 1000L, 1200L, 1500L, 2000L, 2500L, 3000L, 3000L, 3000L) // Total approx 18.6s
 
     companion object {
         private val LOG = Logger.getLogger(JavaFxSwingComposeFFmpegPlayer::class.java.name)
         private const val DETAILED_AUDIO_LOGGING = true
+        @JvmStatic @Volatile var S_loopIteration = 0L
+        private const val GENERAL_MAX_SLEEP_MILLIS = 2000L
+    }
 
-        @JvmStatic
-        @Volatile
-        var S_loopIteration = 0L
+    // MediaClock methods (remain the same)
+    private fun initializeMediaClock(firstFrameTimestamp: Long) {
+        if (!isMediaClockInitialized || (this.firstValidFrameTimestampMicros == 0L && firstFrameTimestamp > 0L) ) {
+            this.firstValidFrameTimestampMicros = firstFrameTimestamp
+            this.systemTimeAnchorNanos = System.nanoTime()
+            this.isMediaClockInitialized = true
+            LOG.info("MediaClock: Initialized/Updated. FirstFrameTS: $firstValidFrameTimestampMicros us, SystemAnchor: $systemTimeAnchorNanos ns")
+        }
+    }
+
+    private fun getMediaClockPositionMicros(): Long {
+        if (!isMediaClockInitialized) return 0L
+        localSoundLine?.let { line ->
+            if (line.isOpen && line.isRunning) {
+                val audioTs = line.microsecondPosition
+                if (audioTs >= 0L) {
+                    if (S_loopIteration > 0L && S_loopIteration % 100L == 1L && DETAILED_AUDIO_LOGGING) LOG.info("MediaClock: Using AudioTrack position: $audioTs µs")
+                    return audioTs
+                } else if (S_loopIteration > 0L && S_loopIteration % 100L == 1L && DETAILED_AUDIO_LOGGING) LOG.warning("MediaClock: AudioTrack position is negative or unreliable ($audioTs µs). Falling back.")
+            }
+        }
+        val elapsedNanos = System.nanoTime() - systemTimeAnchorNanos
+        val estimatedMicros = elapsedNanos / 1000L
+        if (S_loopIteration > 0L && S_loopIteration % 100L == 1L && DETAILED_AUDIO_LOGGING) LOG.info("MediaClock: Using System time fallback. Estimated: $estimatedMicros µs (Anchor: $firstValidFrameTimestampMicros µs)")
+        return estimatedMicros
     }
 
     fun start(mediaPath: String) {
@@ -73,17 +96,15 @@ class JavaFxSwingComposeFFmpegPlayer @JvmOverloads constructor(
             return
         }
         stopRequested = false
+        isMediaClockInitialized = false
+        firstValidFrameTimestampMicros = -1L
 
         playerJob = playerScope.launch {
             S_loopIteration = 0L
-            LOG.info("Player-Coroutine (${Thread.currentThread().name}): Initializing for: $mediaPath")
-
+            LOG.info("Player-Coroutine (${currentCoroutineContext()[CoroutineName]?.name}): Initializing for: $mediaPath")
             cleanupPlayerResources(releaseGrabber = true, closeSoundLine = true)
 
             var currentGrabberInstance: FFmpegFrameGrabber? = null
-            var proceedAfterPolling = false
-
-
             try {
                 LOG.info("Player: Creating FFmpegFrameGrabber for '$mediaPath'")
                 currentGrabberInstance = FFmpegFrameGrabber(mediaPath)
@@ -94,489 +115,362 @@ class JavaFxSwingComposeFFmpegPlayer @JvmOverloads constructor(
                 LOG.info("Player: FFmpegFrameGrabber.start() returned for '$mediaPath' after ${timeAfterGrabberStart - timeBeforeGrabberStart} ms.")
 
                 grabber = currentGrabberInstance
-                val g = grabber!!
+                val g = grabber ?: throw FrameGrabber.Exception("Grabber became null after start assignment")
+
+                LOG.info("Player [After start() call]: Grabber's initial state (may be incomplete) - Format: '${g.format}', VidW: ${g.imageWidth}, AudCh: ${g.audioChannels}")
 
                 var totalPollingTimeMs = 0L
                 var pollingAttempts = 0
                 var metadataObtainedDuringPolling = false
-                var polledWidth = 0; var polledHeight = 0; var polledFormat: String? = null
-                var polledFps = 0.0; var polledAudioChannels = 0; var polledSampleRate = 0
-                var polledPixelFormat = -1
-                var audioSetupAttemptedDuringPolling = false // New flag
+                var audioSetupAttemptedDuringPolling = false
 
-                LOG.info("Player [Polling]: Starting metadata polling. Initial state from grabber - Format: '${g.format}', VidW: ${g.imageWidth}, VidH: ${g.imageHeight}, FPS: ${g.frameRate}, AudCh: ${g.audioChannels}, AudRate: ${g.sampleRate}, PixFmt: ${g.pixelFormat}")
+                LOG.info("Player [Polling]: Starting metadata polling loop. Max attempts: ${pollingIntervalsMs.size}")
 
-                for (intervalMs in experimentalPollingIntervalsMs) {
-                    if (!isActive) { LOG.info("Player [Polling]: Coroutine cancelled."); break }
-                    pollingAttempts++
+                // --- Polling Loop (Strictly following _old.kt logic) ---
+                for (intervalMs in pollingIntervalsMs) {
+                    if (!isActive || stopRequested) { LOG.info("Player [Polling]: Coroutine cancelled or stop requested."); break }
+
                     delay(intervalMs)
+                    pollingAttempts++
                     totalPollingTimeMs += intervalMs
 
-                    // Re-fetch current grabber properties inside the loop
-                    polledWidth = g.imageWidth; polledHeight = g.imageHeight; polledFormat = g.format
-                    polledFps = g.frameRate; polledAudioChannels = g.audioChannels; polledSampleRate = g.sampleRate
-                    polledPixelFormat = g.pixelFormat
+                    // **CRUCIAL: Re-fetch all properties directly from 'g' (the grabber instance) in each iteration**
+                    val currentPolledWidth = g.imageWidth
+                    val currentPolledHeight = g.imageHeight
+                    val currentPolledFormat = g.format
+                    val currentPolledFps = g.frameRate
+                    val currentPolledAudioChannels = g.audioChannels
+                    val currentPolledSampleRate = g.sampleRate
+                    val currentPolledPixelFormat = g.pixelFormat
 
-                    if (pollingAttempts % 2 == 0 || intervalMs == experimentalPollingIntervalsMs.last()) {
-                        LOG.info("Player [Polling]: After delay #$pollingAttempts (total ${totalPollingTimeMs}ms) - Format: '$polledFormat', VidW: $polledWidth, VidH: $polledHeight, FPS: $polledFps, AudCh: $polledAudioChannels, AudRate: $polledSampleRate, PixFmt: $polledPixelFormat")
+                    if (pollingAttempts % 2 == 0 || intervalMs == pollingIntervalsMs.last() || pollingAttempts == 1) {
+                        LOG.info("Player [Polling]: Attempt #$pollingAttempts (total ${totalPollingTimeMs}ms, interval ${intervalMs}ms) - Format: '$currentPolledFormat', VidW: $currentPolledWidth, VidH: $currentPolledHeight, FPS: $currentPolledFps, AudCh: $currentPolledAudioChannels, AudRate: $currentPolledSampleRate, PixFmt: $currentPolledPixelFormat, HasVideo:${g.hasVideo()}, HasAudio:${g.hasAudio()}")
                     }
 
-                    // --- Attempt Audio Setup and Warm-up during Polling if params become valid ---
-                    if (g.hasAudio() && polledAudioChannels > 0 && polledSampleRate > 0 && !audioSetupAttemptedDuringPolling) {
-                        LOG.info("Player [Polling]: Valid audio params detected (Ch: $polledAudioChannels, Rate: $polledSampleRate). Attempting audio setup and warm-up...")
-                        setupAudio(polledSampleRate, polledAudioChannels) // This now includes warm-up
-                        audioSetupAttemptedDuringPolling = true // Mark as attempted
-                        if (localSoundLine != null && localSoundLine!!.isActive) {
-                            LOG.info("Player [Polling]: Audio line is ACTIVE after setup during polling.")
-                        } else if (localSoundLine != null) {
-                            LOG.warning("Player [Polling]: Audio line setup but NOT ACTIVE after setup during polling.")
-                        } else {
-                            LOG.warning("Player [Polling]: Audio setup FAILED during polling.")
+                    // Audio Setup during Polling (from _old.kt)
+                    if (g.hasAudio() && currentPolledAudioChannels > 0 && currentPolledSampleRate > 0 && !audioSetupAttemptedDuringPolling) {
+                        LOG.info("Player [Polling]: Valid audio params detected (Ch: $currentPolledAudioChannels, Rate: $currentPolledSampleRate). Attempting audio setup...")
+                        try {
+                            setupAudio(currentPolledSampleRate, currentPolledAudioChannels)
+                            audioSetupAttemptedDuringPolling = true
+                            if (localSoundLine?.isActive == true) LOG.info("Player [Polling]: Audio line is ACTIVE after setup.")
+                            else LOG.warning("Player [Polling]: Audio line setup but NOT ACTIVE.")
+                        } catch (e: Exception) {
+                            LOG.log(Level.WARNING, "Player [Polling]: Failed to setup audio.", e)
+                            playerEventCallback(PlayerEvent.Error("Polling: Audio setup failed: ${e.message}", e))
                         }
                     }
-                    // --- End of Audio Setup during Polling ---
 
-                    val hasPolledValidVideo = g.hasVideo() && polledWidth > 0 && polledHeight > 0 && polledFps > 0.001
-                    // Audio is considered "ready" for metadata purposes if setup was attempted or params are valid
-                    val hasPolledValidAudioParams = g.hasAudio() && polledAudioChannels > 0 && polledSampleRate > 0
+                    // Success condition from _old.kt (directly using properties from 'g')
+                    val hasPolledValidVideo = (g.hasVideo() && g.imageWidth > 0 && g.imageHeight > 0 && (g.frameRate > 0.001 || !g.hasVideo())) || (!g.hasVideo() && g.imageWidth == 0 && g.imageHeight == 0)
+                    val hasPolledValidAudioParams = (g.hasAudio() && g.audioChannels > 0 && g.sampleRate > 0) || !g.hasAudio()
                     val isAudioConsideredReady = audioSetupAttemptedDuringPolling || hasPolledValidAudioParams
+                    val hasPolledValidFormat = !g.format.isNullOrEmpty() || (!g.hasVideo() && !g.hasAudio())
 
-                    val hasPolledValidFormat = polledFormat != null && polledFormat.isNotEmpty()
-
-                    if (hasPolledValidFormat && (hasPolledValidVideo || isAudioConsideredReady || (!g.hasVideo() && !g.hasAudio()))) {
-                        LOG.info("Player [Polling]: SUCCESS! Validated metadata obtained (or audio setup attempted) after $pollingAttempts attempts and ${totalPollingTimeMs}ms.")
-                        LOG.info("Player [Polling]: Successfully Polled Data - Format: '$polledFormat', VidW: $polledWidth, VidH: $polledHeight, FPS: $polledFps, AudCh: $polledAudioChannels, AudRate: $polledSampleRate, PixFmt: $polledPixelFormat, AudioSetupAttempted: $audioSetupAttemptedDuringPolling")
+                    if (hasPolledValidFormat && hasPolledValidVideo && isAudioConsideredReady) {
+                        LOG.info("Player [Polling]: SUCCESS! Metadata validated after $pollingAttempts attempts (${totalPollingTimeMs}ms).")
+                        LOG.info("Player [Polling Success State]: Format: '${g.format}', VidW: ${g.imageWidth}, VidH: ${g.imageHeight}, FPS: ${g.frameRate}, AudCh: ${g.audioChannels}, AudRate: ${g.sampleRate}, PixFmt: ${g.pixelFormat}")
                         metadataObtainedDuringPolling = true
-                        proceedAfterPolling = true
                         break
                     }
                 }
+                // --- End Polling Loop ---
+                LOG.info("Player [Polling]: Finished. Total attempts: $pollingAttempts, Total time: ${totalPollingTimeMs}ms. Metadata Obtained: $metadataObtainedDuringPolling")
+                LOG.info("Player [Polling FINAL GRABBER STATE (from 'g')]: Format: '${g.format}', VidW: ${g.imageWidth}, VidH: ${g.imageHeight}, FPS: ${g.frameRate}, AudCh: ${g.audioChannels}, AudRate: ${g.sampleRate}, PixFmt: ${g.pixelFormat}, HasVideo:${g.hasVideo()}, HasAudio:${g.hasAudio()}")
 
-                if (!metadataObtainedDuringPolling && isActive) {
-                    LOG.warning("Player [Polling]: FAILED to obtain all critical metadata (or audio setup did not occur as expected) via polling for '$mediaPath' after $pollingAttempts attempts and $totalPollingTimeMs ms.")
-                    LOG.warning("Player [Polling]: Will attempt to derive/finalize metadata from first few frames if possible.")
-                    proceedAfterPolling = true
-                } else if (!isActive) {
-                    LOG.warning("Player: Coroutine cancelled after polling for '$mediaPath'.")
+                if (!metadataObtainedDuringPolling && isActive && !stopRequested) {
+                    LOG.warning("Player [Polling]: FAILED to obtain all critical metadata after ${totalPollingTimeMs}ms.")
+                    // Failure condition from _old.kt: if polling fails, and the grabber still has no video or audio, then it's an error.
+                    if (!(g.imageWidth > 0 && g.hasVideo()) && !(g.audioChannels > 0 && g.hasAudio())) {
+                        val errorMsg = "Polling failed AND grabber has NO valid video OR audio dimensions/channels after polling. Final state from grabber: Format: '${g.format}', VidW: ${g.imageWidth}, AudCh: ${g.audioChannels}"
+                        LOG.severe("Player [Critical]: $errorMsg")
+                        throw FrameGrabber.Exception(errorMsg)
+                    }
+                    LOG.info("Player [Proceeding]: Proceeding with potentially incomplete metadata from grabber as per _old.kt logic.")
+                } else if (!isActive || stopRequested) {
+                    LOG.warning("Player: Coroutine cancelled or stop requested after polling for '$mediaPath'.")
                     g.releaseQuietly(); grabber = null; return@launch
                 }
 
-                val initialWidth: Int
-                val initialHeight: Int
-                val initialPixelFormat: Int
-                val initialFrameRate: Double
-                val finalAudioChannels = if (metadataObtainedDuringPolling && polledAudioChannels > 0) polledAudioChannels else g.audioChannels
-                val finalSampleRate = if (metadataObtainedDuringPolling && polledSampleRate > 0) polledSampleRate else g.sampleRate
+                // Use the state of 'g' (the grabber) as the source of truth after polling
+                val finalWidth = g.imageWidth
+                val finalHeight = g.imageHeight
+                val finalPixelFormat = g.pixelFormat
+                val finalFrameRate = g.frameRate
+                val finalAudioChannels = g.audioChannels
+                val finalSampleRate = g.sampleRate
 
-                if (metadataObtainedDuringPolling) {
-                    initialWidth = polledWidth; initialHeight = polledHeight; initialPixelFormat = polledPixelFormat
-                    initialFrameRate = polledFps
-                } else {
-                    initialWidth = g.imageWidth; initialHeight = g.imageHeight; initialPixelFormat = g.pixelFormat
-                    initialFrameRate = g.frameRate
+                LOG.info("Player [Finalizing Dimensions from 'g']: VidW: $finalWidth, VidH: $finalHeight, AudCh: $finalAudioChannels, AudRate: $finalSampleRate, FPS: $finalFrameRate, PixFmt: $finalPixelFormat")
+
+                if (g.hasVideo() && finalWidth <= 0) {
+                    val errorMsg = "Invalid video width ($finalWidth) for a stream that reports having video (final check)."
+                    LOG.severe("Player: Error - $errorMsg")
+                    playerEventCallback(PlayerEvent.Error(errorMsg, null))
+                    g.releaseQuietly(); grabber = null; return@launch
+                }
+                if (g.hasVideo()){
+                    playerEventCallback(PlayerEvent.VideoDimensionsDetected(finalWidth, finalHeight, finalPixelFormat, finalFrameRate))
                 }
 
-                LOG.info("Player: Effective initial params for setup (polling/grabber): VidW=$initialWidth, VidH=$initialHeight, FPS=$initialFrameRate, PixFmt=$initialPixelFormat, AudCh=$finalAudioChannels, AudRate=$finalSampleRate")
-
-                if (!proceedAfterPolling && !isActive) { g.releaseQuietly(); grabber = null; return@launch }
-
-                videoProcessingContext = Executors.newSingleThreadExecutor { r -> Thread(r, "Player-VideoProcessor") }.asCoroutineDispatcher()
-                audioProcessingContext = Executors.newSingleThreadExecutor { r -> Thread(r, "Player-AudioProcessor") }.asCoroutineDispatcher()
-
-                // Audio setup might have already been done during polling.
-                // If not, it will be attempted from the first audio frame.
-                val audioParamsFinalizedOnLoopStart = audioSetupAttemptedDuringPolling && localSoundLine != null
-
-                if (!isActive) { g.releaseQuietly(); grabber = null; return@launch }
-
-                playbackTimer = PlaybackTimer()
-                val finalTimer = playbackTimer!!
-                var firstValidTimestampFound = -1L
-                var videoDimensionsReportedByEvent = false
-                var reportedFrameRate = if (initialFrameRate > 0.001) initialFrameRate else 25.0
-
-                if (g.hasVideo() && initialWidth > 0 && initialHeight > 0) {
-                    LOG.info("Player: Reporting VideoDimensionsDetected (initial/polled): ${initialWidth}x${initialHeight}, FPS: $initialFrameRate, PixelFormat: $initialPixelFormat")
-                    playerEventCallback(PlayerEvent.VideoDimensionsDetected(initialWidth, initialHeight, initialPixelFormat, initialFrameRate))
-                    videoDimensionsReportedByEvent = true
-                } else if (g.hasVideo()) {
-                    LOG.warning("Player: Video stream present, but initial/polled dimensions are invalid (${initialWidth}x${initialHeight}). Will detect from first valid frame.")
+                if (g.hasAudio() && localSoundLine == null && finalAudioChannels > 0 && finalSampleRate > 0) {
+                    LOG.info("Player: Audio not yet set up, attempting now with final params (Ch:$finalAudioChannels, Rate:$finalSampleRate)...")
+                    try {
+                        setupAudio(finalSampleRate, finalAudioChannels)
+                    } catch (e: Exception) {
+                        LOG.log(Level.WARNING, "Player: Failed to setup audio (post-polling).", e)
+                        playerEventCallback(PlayerEvent.Error("Audio setup failed (post-polling): ${e.message}", e))
+                    }
                 }
 
-                if (isActive && !stopRequested) playerEventCallback(PlayerEvent.PlaybackStarted)
-                LOG.info("Player: Starting main frame processing loop for '$mediaPath'. Audio finalized on start: $audioParamsFinalizedOnLoopStart")
+                videoProcessingContext = Executors.newSingleThreadExecutor { r -> Thread(r, "Player-VideoProcessor").apply { isDaemon = true } }.asCoroutineDispatcher()
+                audioProcessingContext = Executors.newSingleThreadExecutor { r -> Thread(r, "Player-AudioProcessor").apply { isDaemon = true } }.asCoroutineDispatcher()
 
-                var audioParamsFinalizedInLoop = audioParamsFinalizedOnLoopStart
+                playerEventCallback(PlayerEvent.PlaybackStarted)
+                LOG.info("Player: Starting main frame processing loop with MediaClock.")
 
+                var reportedFrameRateForFpsCalc = if (finalFrameRate > 0.001) finalFrameRate else 25.0 // Default for FPS calc if needed
+
+                // Main Playback Loop (adapting _old.kt's frame processing into MediaClock sync)
                 while (isActive && !stopRequested) {
                     S_loopIteration++
-                    var frame: Frame? = null
-                    try {
-                        frame = g.grab()
-                    } catch (e: FrameGrabber.Exception) {
-                        LOG.log(Level.WARNING, "Player: Error grabbing frame in main loop for '$mediaPath'.", e)
-                        if (isActive) playerEventCallback(PlayerEvent.Error("Grab error", e))
+                    val frame = try { g.grab() } catch (e: FrameGrabber.Exception) {
+                        LOG.log(Level.WARNING, "Player: Error grabbing frame.", e)
+                        playerEventCallback(PlayerEvent.Error("Error grabbing frame: ${e.message}", e))
                         break
                     }
                     if (frame == null) {
-                        LOG.info("Player: End of stream reached in main loop for '$mediaPath'.")
-                        if (isActive) playerEventCallback(PlayerEvent.EndOfMedia)
-                        break
+                        LOG.info("Player: End of stream (grabber returned NULL).")
+                        playerEventCallback(PlayerEvent.EndOfMedia); break
                     }
 
-                    try {
-                        // --- Finalize Audio Setup from First Valid Audio Frame if not done during polling ---
-                        if (!audioParamsFinalizedInLoop && g.hasAudio() && frame.samples?.isNotEmpty() == true && frame.sampleRate > 0 && frame.audioChannels > 0) {
-                            val srToUse = frame.sampleRate // Prefer frame's direct info if polling didn't yield
-                            val chToUse = frame.audioChannels
-                            LOG.info("Player [MainLoop]: Audio params not set during polling. Detected from frame: Rate $srToUse, Ch $chToUse. Finalizing audio setup.")
-                            setupAudio(srToUse, chToUse) // This now includes warm-up
-                            audioParamsFinalizedInLoop = true
+                    if (!isMediaClockInitialized && frame.timestamp >= 0L) {
+                        initializeMediaClock(frame.timestamp)
+                    } else if (isMediaClockInitialized && firstValidFrameTimestampMicros == 0L && frame.timestamp > 0L) {
+                        initializeMediaClock(frame.timestamp)
+                    }
+                    if (!isMediaClockInitialized) {
+                        LOG.warning("Player [MainLoop]: MediaClock not initialized. Skipping frame TS: ${frame.timestamp}")
+                        frame.close(); delay(10); continue
+                    }
+
+                    val currentFrameAbsoluteTs = frame.timestamp
+                    val currentFrameRelativeTs = currentFrameAbsoluteTs - firstValidFrameTimestampMicros
+                    val currentMediaClockTimeMicros = getMediaClockPositionMicros()
+
+                    val hasImage = frame.image != null && frame.imageHeight > 0 && frame.imageWidth > 0
+                    val hasAudio = frame.samples != null && frame.samples[0] != null && localSoundLine != null
+
+
+                    // From _old.kt: Dynamic FPS calculation if needed (and if no VideoDimensionsDetected was sent from polling)
+                    if (hasImage && finalFrameRate <= 0.001 && S_loopIteration > 10L && S_loopIteration % 10L == 0L && currentFrameRelativeTs > 0L) {
+                        val estimatedFps = (S_loopIteration.toDouble() * 1_000_000.0) / currentFrameRelativeTs.toDouble()
+                        if (estimatedFps > 0) {
+                            LOG.info("Player [MainLoop]: Estimating FPS from frame timestamps: $estimatedFps")
+                            reportedFrameRateForFpsCalc = estimatedFps
+                            // Optionally send a new VideoDimensionsDetected if FPS changed significantly
+                            // playerEventCallback(PlayerEvent.VideoDimensionsDetected(finalWidth, finalHeight, finalPixelFormat, estimatedFps))
                         }
+                    }
 
-                        if (!finalTimer.hasTimerStarted && frame.timestamp >= 0) {
-                            finalTimer.start(frame.timestamp); firstValidTimestampFound = finalTimer.firstMediaFrameAbsoluteTimestampMicros
-                            LOG.info("Player [MainLoop]: Timer started with TS: $firstValidTimestampFound")
-                        } else if (firstValidTimestampFound == 0L && frame.timestamp > 0 && finalTimer.firstMediaFrameAbsoluteTimestampMicros == 0L) {
-                            finalTimer.start(frame.timestamp); firstValidTimestampFound = frame.timestamp
-                            LOG.info("Player [MainLoop]: Timer re-aligned from TS 0 to $firstValidTimestampFound")
+
+                    if (S_loopIteration % 100L == 1L) {
+                        LOG.info("Player [MainLoop $S_loopIteration]: FrameAbsTS=${currentFrameAbsoluteTs}µs, FrameRelTS=${currentFrameRelativeTs}µs, MediaClock=${currentMediaClockTimeMicros}µs, Img=$hasImage, Aud=$hasAudio, SoundLineRunning=${localSoundLine?.isRunning}")
+                    }
+
+                    if (hasAudio) {
+                        val audioFrameToPlay = frame.clone()
+                        launch(audioProcessingContext!!) { // Use a separate context for audio
+                            try { if (!stopRequested) playAudioSample(audioFrameToPlay, localSoundLine!!) }
+                            catch (e: Exception) { LOG.log(Level.WARNING, "Player: Error playing audio sample.", e) }
+                            finally { audioFrameToPlay.close() }
                         }
+                    }
 
-                        if (frame.timestamp < firstValidTimestampFound && firstValidTimestampFound != 0L) {
-                            LOG.warning("Player [MainLoop]: Frame TS ${frame.timestamp} < FirstValidTS $firstValidTimestampFound. Skipping.")
-                            continue
-                        }
-                        val currentFrameRelativeTs = frame.timestamp - finalTimer.firstMediaFrameAbsoluteTimestampMicros
+                    if (hasImage) {
+                        val videoFrameToRender = frame.clone()
+                        launch(videoProcessingContext!!) { // Use a separate context for video
+                            try {
+                                if (!stopRequested) {
+                                    val currentVideoMediaClockTimeMicros = getMediaClockPositionMicros()
+                                    val videoTimestampToRender = currentFrameRelativeTs
+                                    var delayNeededMicros = videoTimestampToRender - currentVideoMediaClockTimeMicros
 
-                        val isActualVideoFrame = frame.image != null && frame.imageWidth > 0 && frame.imageHeight > 0
-                        val isActualAudioFrame = frame.samples?.isNotEmpty() == true
-
-                        if (isActualVideoFrame && !videoDimensionsReportedByEvent && g.hasVideo()) {
-                            val w = if (metadataObtainedDuringPolling && polledWidth > 0) polledWidth else frame.imageWidth
-                            val h = if (metadataObtainedDuringPolling && polledHeight > 0) polledHeight else frame.imageHeight
-                            val pxf = if (metadataObtainedDuringPolling && polledPixelFormat != -1) polledPixelFormat else g.pixelFormat
-                            var fps = if (metadataObtainedDuringPolling && polledFps > 0.001) polledFps else g.frameRate
-                            if (fps <= 0.001 && currentFrameRelativeTs > 0 && S_loopIteration > 10L && S_loopIteration % 10L == 0L) {
-                                fps = (S_loopIteration.toDouble() * 1_000_000.0) / currentFrameRelativeTs.toDouble()
-                                LOG.info("Player [MainLoop]: Estimating FPS from frame timestamps: $fps")
-                            }
-
-                            if (w > 0 && h > 0) {
-                                LOG.info("Player [MainLoop]: Reporting/Confirming video dimensions: ${w}x${h}, PixFmt: $pxf, FPS: $fps")
-                                playerEventCallback(PlayerEvent.VideoDimensionsDetected(w, h, pxf, fps))
-                                videoDimensionsReportedByEvent = true
-                                if (fps > 0.001) reportedFrameRate = fps
-                            }
-                        }
-                        if (g.hasVideo() && !videoDimensionsReportedByEvent && S_loopIteration > 30L ) {
-                            val gw = g.imageWidth; val gh = g.imageHeight; var gfps = g.frameRate; val gpxfmt = g.pixelFormat
-                            if (gfps <= 0.001 && currentFrameRelativeTs > 0 && S_loopIteration > 1L) {
-                                gfps = (S_loopIteration.toDouble() * 1_000_000.0) / currentFrameRelativeTs.toDouble()
-                            }
-                            if (gw > 0 && gh > 0) {
-                                LOG.info("Player [MainLoop]: Fallback reporting video dimensions from grabber at iter $S_loopIteration: ${gw}x${gh}, FPS $gfps, PxFmt $gpxfmt")
-                                playerEventCallback(PlayerEvent.VideoDimensionsDetected(gw, gh, gpxfmt, gfps)); videoDimensionsReportedByEvent = true; if(gfps > 0.001) reportedFrameRate = gfps
-                            } else {
-                                LOG.severe("Player [MainLoop]: Failed to get valid video dimensions for '$mediaPath' after ${S_loopIteration-1} frames. Grabber still reports ${gw}x${gh}. Terminating.")
-                                if(isActive) playerEventCallback(PlayerEvent.Error("No valid video dimensions", IllegalStateException("Invalid video dimensions after retries")))
-                                stopRequested = true; continue
-                            }
-                        }
-
-                        if (S_loopIteration % 20L == 1L) {
-                            val currentPlaybackTimeMicros = finalTimer.getCurrentRelativePlaybackTimeMicros(localSoundLine, reportedFrameRate, currentFrameRelativeTs, S_loopIteration == 1L && isActualVideoFrame)
-                            LOG.info("Loop $S_loopIteration: AbsTS:${frame.timestamp}, RelTS:$currentFrameRelativeTs, Playback:$currentPlaybackTimeMicros, ReliableAudio:${finalTimer.isAudioClockReliableAndActive(localSoundLine)}, Vid:$isActualVideoFrame, Aud:$isActualAudioFrame, VidRpt:$videoDimensionsReportedByEvent, AudFin:$audioParamsFinalizedInLoop")
-                        }
-
-                        if (isActualVideoFrame && videoDimensionsReportedByEvent) {
-                            val videoClone = frame.clone()
-                            launch(videoProcessingContext!!) {
-                                try {
-                                    if (!isActive || stopRequested) return@launch
-                                    var sleepMillis = 0L
-                                    val currentSystemClockRelativeTimeMicros = finalTimer.getCurrentRelativePlaybackTimeMicros(localSoundLine, reportedFrameRate, currentFrameRelativeTs, false)
-                                    val delayMicros = currentFrameRelativeTs - currentSystemClockRelativeTimeMicros
-                                    if (delayMicros > videoTargetDelayToleranceMicros) {
-                                        sleepMillis = delayMicros / 1000L; sleepMillis = min(sleepMillis, videoMaxSleepMs)
-                                    } else if (delayMicros < -videoTargetDelayToleranceMicros && delayMicros < -200_000 && finalTimer.isAudioClockReliableAndActive(localSoundLine)) {
-                                        LOG.warning("Vid Frame RelTS $currentFrameRelativeTs too late vs reliable audio $currentSystemClockRelativeTimeMicros. Skipping.")
-                                        return@launch
+                                    if (delayNeededMicros.compareTo(minMeaningfulSleepMs * 1000L) > 0) {
+                                        val sleepMs = min(delayNeededMicros / 1000L, videoMaxSleepMsIfEarly)
+                                        if (S_loopIteration % 50L == 1L && DETAILED_AUDIO_LOGGING) LOG.info("Player [VideoSync]: Video frame (RelTS $videoTimestampToRender µs) is early by ${delayNeededMicros / 1000L} ms. Sleeping for $sleepMs ms. MediaClock: $currentVideoMediaClockTimeMicros µs")
+                                        if (sleepMs > 0L) delay(sleepMs)
+                                    } else if (delayNeededMicros.compareTo(-videoCatchUpDropThresholdMicros) < 0 && reportedFrameRateForFpsCalc > 0.0) {
+                                        if (S_loopIteration % 50L == 1L && DETAILED_AUDIO_LOGGING) LOG.warning("Player [VideoSync]: Video frame (RelTS $videoTimestampToRender µs) is LATE by ${-delayNeededMicros / 1000L} ms. Rendering. MediaClock: $currentVideoMediaClockTimeMicros µs")
+                                        // Not dropping frames yet, just rendering immediately
                                     }
-                                    if (sleepMillis >= minMeaningfulVideoDelayMs) delay(sleepMillis)
-                                    if (isActive && !stopRequested) videoFrameOutputCallback(videoClone, currentFrameRelativeTs)
-                                } catch (e: CancellationException) {}
-                                catch (e: Exception) { LOG.log(Level.WARNING, "VidProc Error Loop $S_loopIteration", e) }
-                                finally { videoClone.close() }
-                            }
-                        }
-                        if (isActualAudioFrame && localSoundLine != null && audioParamsFinalizedInLoop) {
-                            val audioClone = frame.clone()
-                            launch(audioProcessingContext!!) {
-                                try {
-                                    if (isActive && !stopRequested) {
-                                        if (audioDataOutputCallback != null) audioDataOutputCallback.invoke(audioClone.samples[0] as ShortBuffer, localSoundLine!!, audioClone)
-                                        else playAudioFrameInternal(audioClone, localSoundLine!!)
-                                    }
-                                } finally { audioClone.close() }
-                            }
-                        }
-                    } finally {
-                        frame.close()
-                    }
-
-                    val isEffectivelyEmptyFrame = (frame.image == null || frame.imageWidth <= 0) && (frame.samples == null || frame.samples.isEmpty() || !frame.samples[0].hasRemaining())
-                    if (isEffectivelyEmptyFrame && isActive && !stopRequested) { delay(5L) }
-                    else if (finalTimer.hasTimerStarted) {
-                        val relTsForSync = frame.timestamp - finalTimer.firstMediaFrameAbsoluteTimestampMicros
-                        val frameReadAheadMicros = relTsForSync - finalTimer.getCurrentRelativePlaybackTimeMicros(localSoundLine, reportedFrameRate, relTsForSync, false)
-                        if (frameReadAheadMicros > maxReadAheadBufferMicros) {
-                            var mainLoopSleepMillis = (frameReadAheadMicros - maxReadAheadBufferMicros) / 1000L
-                            mainLoopSleepMillis = min(mainLoopSleepMillis, mainLoopDelayCapMillisUnreliableTimer)
-                            if (mainLoopSleepMillis >= minMeaningfulVideoDelayMs) delay(mainLoopSleepMillis)
+                                    videoFrameOutputCallback(videoFrameToRender, currentFrameRelativeTs)
+                                }
+                            } catch (e: CancellationException) { throw e }
+                            catch (e: Exception) { LOG.log(Level.WARNING, "Player: Error processing/rendering video frame.", e) }
+                            finally { videoFrameToRender.close() }
                         }
                     }
-                } // End While
+                    if (!hasImage && !hasAudio) { if (S_loopIteration % 100L == 1L) LOG.info("Player [MainLoop]: Frame has no video or audio content. TS: ${frame.timestamp}") }
+                    frame.close()
 
-            } catch (e: Exception) {
-                if (e is CancellationException) {
-                    LOG.info("Player: Playback coroutine cancelled for '$mediaPath'.")
-                } else {
-                    LOG.log(Level.SEVERE, "Player: Error in playback coroutine's main block for '$mediaPath'", e)
-                    if(isActive) playerEventCallback(PlayerEvent.Error("Critical playback error: ${e.message}", e))
+                    val mediaClockNowForBackpressure = getMediaClockPositionMicros()
+                    val readAheadMicros = currentFrameRelativeTs - mediaClockNowForBackpressure
+                    if (readAheadMicros.compareTo(maxReadAheadBufferMicros) > 0) {
+                        val sleepDurationMicros = readAheadMicros - maxReadAheadBufferMicros
+                        val sleepMs = sleepDurationMicros / 1000L
+                        if (sleepMs >= minMeaningfulSleepMs) {
+                            if (S_loopIteration % 100L == 1L && DETAILED_AUDIO_LOGGING) LOG.info("Player [MainLoop]: Backpressure. Read ahead ${readAheadMicros / 1000L} ms > max ${maxReadAheadBufferMicros / 1000L} ms. Sleeping for $sleepMs ms.")
+                            delay(sleepMs)
+                        }
+                    } else if (!hasImage && !hasAudio) { delay(1L) }
                 }
+            } catch (e: FrameGrabber.Exception) {
+                LOG.log(Level.SEVERE, "Player: FFmpegFrameGrabber Exception", e)
+                playerEventCallback(PlayerEvent.Error("FFmpeg Grabber error: ${e.message}", e))
+            } catch (e: LineUnavailableException) {
+                LOG.log(Level.SEVERE, "Player: Audio Line Unavailable", e)
+                playerEventCallback(PlayerEvent.Error("Audio Line unavailable: ${e.message}", e))
+            } catch (e: CancellationException) {
+                LOG.info("Player: Coroutine cancelled.")
+                // If cancellation is from stop(), it's expected. Otherwise, rethrow if needed.
+                if (e.message != "Player stop requested by API") throw e
+            } catch (e: Exception) {
+                LOG.log(Level.SEVERE, "Player: Unexpected critical error", e)
+                playerEventCallback(PlayerEvent.Error("Unexpected error: ${e.message}", e))
             } finally {
-                LOG.info("Player: Playback coroutine for '$mediaPath' finishing. Cleanup...")
+                LOG.info("Player-Coroutine: Finishing. stopRequested=$stopRequested, isActive=$isActive")
+                if (isActive && !stopRequested && grabber != null) {
+                    playerEventCallback(PlayerEvent.EndOfMedia)
+                }
                 cleanupPlayerResources(releaseGrabber = true, closeSoundLine = true)
-                LOG.info("Player: Playback coroutine for '$mediaPath' terminated.")
+                LOG.info("Player-Coroutine: Fully terminated.")
             }
         }
     }
 
-    private suspend fun setupAudio(sampleRate: Int, audioChannels: Int) {
-        LOG.info("Player: setupAudio CALLED with - SampleRate: $sampleRate, Channels: $audioChannels")
-        if (audioChannels <= 0 || sampleRate <= 0) {
-            LOG.warning("Player: setupAudio received invalid params. Rate $sampleRate, Ch $audioChannels. No audio line will be created.")
-            localSoundLine = null
-            return
-        }
-        LOG.info("Player: Attempting to setup audio with Rate $sampleRate, Channels $audioChannels.")
-        var audioFormat = AudioFormat(sampleRate.toFloat(), 16, audioChannels, true, false /*S16LE*/)
-        var lineInfo = DataLine.Info(SourceDataLine::class.java, audioFormat)
+    // stop() method - ensure it's present and cancels the job
+    fun stop() {
+        LOG.info("Player: stop() method called.")
+        stopRequested = true
+        playerJob?.cancel(CancellationException("Player stop requested by API")) // Explicitly cancel the job
+    }
 
-        if (!AudioSystem.isLineSupported(lineInfo)) {
-            LOG.warning("Player: S16LE not supported. Trying S16BE for Rate $sampleRate, Ch $audioChannels.")
-            audioFormat = AudioFormat(sampleRate.toFloat(), 16, audioChannels, true, true /*S16BE*/)
-            lineInfo = DataLine.Info(SourceDataLine::class.java, audioFormat)
-        }
+    // close() method - ensure it waits for the job to complete
+    override fun close() {
+        LOG.info("Player: close() called. Setting stopRequested and cancelling/joining job.")
+        stopRequested = true
+        val jobToWait = playerJob // Capture current job
 
-        if (AudioSystem.isLineSupported(lineInfo)) {
-            try {
-                val frameSize = audioFormat.frameSize
-                val warmUpDurationMillis = 100
-                var warmUpBufferSize = (frameSize * audioFormat.frameRate * (warmUpDurationMillis / 1000.0f)).toInt()
-                warmUpBufferSize = (warmUpBufferSize / frameSize) * frameSize
-                warmUpBufferSize = warmUpBufferSize.coerceAtLeast(frameSize * 128).coerceAtMost(16384)
-
-                val desiredPlayerBufferSize = (frameSize * audioFormat.frameRate * 0.5f).toInt()
-                val minPlayerBufferSize = frameSize * 256
-                val actualPlayerBufferSize = desiredPlayerBufferSize.coerceAtLeast(minPlayerBufferSize).coerceAtMost(1024 * 1024)
-
-                localSoundLine?.close()
-                val soundLine = AudioSystem.getLine(lineInfo) as SourceDataLine
-                soundLine.open(audioFormat, actualPlayerBufferSize)
-                soundLine.start()
-
-                LOG.info("Player: Audio line opened and started. Format: $audioFormat, ActualBuffer: ${soundLine.bufferSize}, isOpen: ${soundLine.isOpen}, isActive: ${soundLine.isActive}, isRunning: ${soundLine.isRunning}")
-
-                // --- Audio Line Warm-up ---
-                if (!soundLine.isActive && soundLine.isOpen && soundLine.isRunning) {
-                    LOG.info("Player: Audio line not immediately active. Attempting to write ${warmUpBufferSize} bytes of silence to warm up...")
-                    try {
-                        val silence = ByteArray(warmUpBufferSize)
-                        val written = soundLine.write(silence, 0, silence.size)
-                        LOG.info("Player: Wrote $written bytes of silence for warm-up.")
-                        delay(50) // Give it a moment
-                        if (soundLine.isActive) {
-                            LOG.info("Player: Audio line is NOW ACTIVE after warm-up write.")
-                        } else {
-                            LOG.warning("Player: Audio line STILL NOT ACTIVE after warm-up write. isActive: ${soundLine.isActive}, isRunning: ${soundLine.isRunning}")
-                        }
-                    } catch (e: Exception) {
-                        LOG.log(Level.WARNING, "Player: Exception during audio line warm-up write.", e)
+        if (jobToWait != null && jobToWait.isActive) {
+            runBlocking { // Use runBlocking to wait from a non-suspending context.
+                try {
+                    LOG.info("Player: Attempting to cancel and join playerJob in close().")
+                    withTimeout(GENERAL_MAX_SLEEP_MILLIS + 2000L) {
+                        jobToWait.cancelAndJoin()
                     }
-                } else if (soundLine.isActive) {
-                    LOG.info("Player: Audio line was already active immediately after start().")
-                } else {
-                    LOG.warning("Player: Audio line state unexpected after start: isOpen=${soundLine.isOpen}, isActive=${soundLine.isActive}, isRunning=${soundLine.isRunning}")
+                    LOG.info("Player: Player job cancelled and joined successfully in close().")
+                } catch (e: TimeoutCancellationException) {
+                    LOG.warning("Player: Timeout waiting for player job in close(). Forcing resource cleanup.")
+                } catch (e: CancellationException) {
+                    LOG.info("Player: Player job was already cancelled or completed when close() was called.")
+                } catch (e: Exception) {
+                    LOG.log(Level.WARNING, "Player: Exception during player job cancel/join in close().", e)
                 }
-                localSoundLine = soundLine // Assign only if setup is mostly successful
-
-            } catch (e: Exception) {
-                LOG.log(Level.SEVERE, "Player: Error setting up audio line for $audioFormat.", e)
-                if(playerScope.isActive) playerEventCallback(PlayerEvent.Error(e.message ?: "Audio setup error", e))
-                localSoundLine = null
             }
         } else {
-            LOG.warning("Player: Neither S16LE nor S16BE audio line supported for: Rate $sampleRate, Channels $audioChannels.")
-            if(playerScope.isActive) playerEventCallback(PlayerEvent.Error("S16 PCM audio format not supported", IllegalStateException("Unsupported audio format for playback")))
-            localSoundLine = null
+            LOG.info("Player: Player job in close() was null or not active.")
+        }
+        cleanupPlayerResources(releaseGrabber = true, closeSoundLine = true, forceShutdownExecutors = true)
+        LOG.info("Player: close() finished.")
+    }
+
+    // setupAudio, playAudioSample, cleanupPlayerResources, shutdownExecutor methods remain largely the same as your last good version.
+    // Ensure playAudioSample correctly handles endianness based on line.format.isBigEndian.
+
+    @Throws(LineUnavailableException::class, SecurityException::class)
+    private fun setupAudio(sampleRate: Int, channels: Int) {
+        if (localSoundLine?.isOpen == true) {
+            LOG.info("Player: Audio line already open. Closing to reconfigure.")
+            localSoundLine?.drain(); localSoundLine?.stop(); localSoundLine?.close()
+        }
+        val audioFormatLE = AudioFormat(sampleRate.toFloat(), 16, channels, true, false) // S16LE
+        val audioFormatBE = AudioFormat(sampleRate.toFloat(), 16, channels, true, true)  // S16BE
+        var lineToUse: SourceDataLine? = null
+        var chosenFormat: AudioFormat? = null
+
+        if (AudioSystem.isLineSupported(DataLine.Info(SourceDataLine::class.java, audioFormatLE))) {
+            lineToUse = AudioSystem.getLine(DataLine.Info(SourceDataLine::class.java, audioFormatLE)) as SourceDataLine
+            chosenFormat = audioFormatLE
+            LOG.info("Player: S16LE audio format selected: $chosenFormat")
+        } else if (AudioSystem.isLineSupported(DataLine.Info(SourceDataLine::class.java, audioFormatBE))) {
+            lineToUse = AudioSystem.getLine(DataLine.Info(SourceDataLine::class.java, audioFormatBE)) as SourceDataLine
+            chosenFormat = audioFormatBE
+            LOG.info("Player: S16BE audio format selected: $chosenFormat")
+        } else {
+            throw LineUnavailableException("Neither S16LE nor S16BE audio format supported for $sampleRate Hz, $channels channels.")
+        }
+
+        localSoundLine = lineToUse.apply {
+            // Use the chosenFormat for buffer size calculation before open, as line.format is only valid after open.
+            var bytesPerFrame = chosenFormat!!.frameSize // chosenFormat is guaranteed non-null here
+            if (bytesPerFrame == AudioSystem.NOT_SPECIFIED) bytesPerFrame = (chosenFormat.sampleSizeInBits / 8) * chosenFormat.channels
+            val bufferDurationMillis = 500
+            val desiredBufferSize = Math.max(8192, (bytesPerFrame * chosenFormat.frameRate * (bufferDurationMillis / 1000.0f)).toInt())
+
+            LOG.info("Player: Opening audio line with format: $chosenFormat, desired buffer size: $desiredBufferSize bytes.")
+            open(chosenFormat, desiredBufferSize) // Open with the specifically chosen format
+            start()
+            LOG.info("Player: Audio line opened and started. Actual Line Format: ${this.format}, Buffer size: ${this.bufferSize}. isOpen: $isOpen, isRunning: $isRunning, isActive: ${this.isActive()}")
         }
     }
 
-    private fun playAudioFrameInternal(audioFrame: Frame, soundLine: SourceDataLine) {
-        if (!soundLine.isOpen || !playerScope.isActive || stopRequested) return
-        val samplesBuffer = audioFrame.samples?.getOrNull(0)
-        if (samplesBuffer == null || !samplesBuffer.hasRemaining()) {
-            if (DETAILED_AUDIO_LOGGING) LOG.fine("Player [AudioInternal]: No audio samples or buffer empty in frame TS ${audioFrame.timestamp}.")
+    private fun playAudioSample(audioFrame: Frame, line: SourceDataLine) {
+        audioDataOutputCallback?.let { callback ->
+            val samples = audioFrame.samples?.get(0) as? ShortBuffer
+            if (samples != null) callback(samples, line, audioFrame)
+            else if (DETAILED_AUDIO_LOGGING && S_loopIteration % 100L == 1L) LOG.warning("Player [playAudioSample]: Audio frame has no samples for callback.")
             return
         }
-        val bytesToWrite: ByteArray? = when (samplesBuffer) {
-            is ShortBuffer -> {
-                val remainingShorts = samplesBuffer.remaining()
-                val tempBytes = ByteArray(remainingShorts * 2)
-                val byteBufferOrder = if (soundLine.format.isBigEndian) ByteOrder.BIG_ENDIAN else ByteOrder.LITTLE_ENDIAN
-                val bb = ByteBuffer.allocate(tempBytes.size).order(byteBufferOrder)
-                bb.asShortBuffer().put(samplesBuffer.slice())
-                bb.rewind(); bb.get(tempBytes)
-                tempBytes
-            }
-            is FloatBuffer -> {
-                val remainingFloats = samplesBuffer.remaining()
-                val tempShorts = ShortArray(remainingFloats)
-                val slicedSamples = samplesBuffer.slice()
-                for (i in tempShorts.indices) tempShorts[i] = (slicedSamples.get() * 32767.0f).coerceIn(-32768.0f, 32767.0f).toInt().toShort()
-                val tempBytes = ByteArray(tempShorts.size * 2)
-                val byteBufferOrder = if (soundLine.format.isBigEndian) ByteOrder.BIG_ENDIAN else ByteOrder.LITTLE_ENDIAN
-                ByteBuffer.wrap(tempBytes).order(byteBufferOrder).asShortBuffer().put(tempShorts)
-                tempBytes
-            }
-            else -> { LOG.warning("[AudioInternal] Unhandled audio type: ${samplesBuffer.javaClass.name}. TS: ${audioFrame.timestamp}"); null }
+        val samplesBuffer = audioFrame.samples?.get(0) as? ShortBuffer
+        if (samplesBuffer == null || !line.isOpen) {
+            if (DETAILED_AUDIO_LOGGING && S_loopIteration % 100L == 1L) LOG.warning("[DefaultAudioPlay] Samples buffer null or line not open. LineOpen: ${line.isOpen}")
+            return
         }
-        if (bytesToWrite != null && bytesToWrite.isNotEmpty()) {
-            try {
-                // The warm-up should ideally make the line active.
-                // If it's still not active here, it's a more persistent issue.
-                if (!soundLine.isActive && soundLine.isOpen) {
-                    LOG.warning("[AudioInternal] SoundLine open but still not active before write. TS: ${audioFrame.timestamp}. Last attempt to start.")
-                    soundLine.start() // One last try
-                    if (!soundLine.isActive) {
-                        LOG.severe("[AudioInternal] SoundLine FAILED to activate despite warm-up and re-attempts. TS: ${audioFrame.timestamp}. No audio data will be written for this frame.");
-                        return
-                    }
-                }
-                if (soundLine.isActive) {
-                    soundLine.write(bytesToWrite, 0, bytesToWrite.size)
-                } else {
-                    LOG.warning("[AudioInternal] SoundLine not active, cannot write audio. TS: ${audioFrame.timestamp}")
-                }
-            } catch (e: Exception) { LOG.log(Level.WARNING, "[AudioInternal] Exception writing audio. TS: ${audioFrame.timestamp}", e) }
-        }
+        val numSamples = samplesBuffer.remaining()
+        if (numSamples == 0) return
+
+        val byteBuffer = ByteBuffer.allocate(numSamples * 2)
+        // Set byte order based on the AudioFormat of the SourceDataLine
+        byteBuffer.order(if (line.format.isBigEndian) ByteOrder.BIG_ENDIAN else ByteOrder.LITTLE_ENDIAN)
+
+        for (i in 0 until numSamples) byteBuffer.putShort(samplesBuffer.get(samplesBuffer.position() + i))
+        val audioData = byteBuffer.array()
+        val bytesWritten = line.write(audioData, 0, audioData.size)
+
+        if (bytesWritten < audioData.size && DETAILED_AUDIO_LOGGING) LOG.warning("Player [DefaultAudioPlay]: Partial write. Wrote $bytesWritten of ${audioData.size}.")
+        if (S_loopIteration % 200L == 1L && DETAILED_AUDIO_LOGGING && bytesWritten > 0) LOG.info("Player [DefaultAudioPlay]: Wrote $bytesWritten bytes. Line available: ${line.available()}")
     }
 
-    fun stop() {
-        LOG.info("Player: stop() called.")
-        stopRequested = true
-        val jobToCancel = playerJob
-        playerJob = null
-        runBlocking(Dispatchers.Default) {
-            try {
-                jobToCancel?.cancelAndJoin()
-                LOG.info("Player: Playback job cancelled/joined in stop().")
-            } catch (e: Exception) { LOG.log(Level.WARNING, "Player: Exc joining job in stop()", e) }
+    private fun cleanupPlayerResources(releaseGrabber: Boolean, closeSoundLine: Boolean, forceShutdownExecutors: Boolean = false) {
+        LOG.info("Player: Cleanup. ReleaseGrabber=$releaseGrabber, CloseSoundLine=$closeSoundLine, ForceShutdownExec=$forceShutdownExecutors")
+        if (releaseGrabber) {
+            grabber?.let { g -> try { g.stop(); g.release(); LOG.info("Player: Grabber released.") } catch (e: Exception) { LOG.log(Level.WARNING, "Grabber release error.", e) } }
+            grabber = null
         }
-        cleanupPlayerResources(releaseGrabber = true, closeSoundLine = true)
-        LOG.info("Player: stop() finished.")
-    }
-
-    fun release() {
-        LOG.info("Player: release() called.")
-        if (playerJob?.isActive == true || stopRequested) stop()
-        else cleanupPlayerResources(releaseGrabber = true, closeSoundLine = true)
-        try {
-            if (playerScope.isActive) playerScope.cancel("Player released")
-        } catch (e: Exception) { LOG.log(Level.WARNING, "Player: Exc cancelling scope", e) }
-        grabber=null; localSoundLine=null; playbackTimer=null
-        LOG.info("Player: release() finished.")
-    }
-
-    override fun close() { release() }
-
-    private fun cleanupPlayerResources(releaseGrabber: Boolean, closeSoundLine: Boolean) {
-        LOG.info("Player: cleanupPlayerResources. Grab: $releaseGrabber, Sound: $closeSoundLine. GrabberFmt: ${grabber?.format}")
-        audioProcessingContext?.closeFinally(); audioProcessingContext = null
-        videoProcessingContext?.closeFinally(); videoProcessingContext = null
         if (closeSoundLine) {
-            localSoundLine?.let {
-                try { if (it.isOpen) { it.flush(); it.drain(); it.stop(); it.close(); } }
-                catch (e: Exception) { LOG.log(Level.WARNING, "Exc closing soundline", e) }
-            }
+            localSoundLine?.let { line -> if (line.isOpen) try { line.drain(); line.stop(); line.close(); LOG.info("Player: SoundLine closed.") } catch (e: Exception) { LOG.log(Level.WARNING, "SoundLine close error.", e) } }
             localSoundLine = null
         }
-        if (releaseGrabber) { grabber?.releaseQuietly(); grabber = null }
-        playbackTimer = null
-        LOG.info("Player: cleanupPlayerResources finished.")
-    }
-
-    private fun FFmpegFrameGrabber?.releaseQuietly() {
-        this?.let {
-            try {
-                LOG.info("Releasing grabber: ${try {it.format} catch(e:Throwable){"N/A"}}")
-                it.stop(); it.release()
-            } catch (e: Exception) { LOG.log(Level.WARNING, "Exc releasing grabber", e) }
-        }
-    }
-
-    private fun ExecutorCoroutineDispatcher.closeFinally() {
-        try { this.close() } catch (e: Exception) { LOG.log(Level.WARNING, "Exc closing dispatcher", e) }
-    }
-
-    private class PlaybackTimer {
-        private var systemStartTimeNanos: Long = 0L
-        val firstMediaFrameAbsoluteTimestampMicros: Long
-            get() = _firstMediaFrameAbsoluteTimestampMicros
-        private var _firstMediaFrameAbsoluteTimestampMicros: Long = -1L
-
-        var hasTimerStarted: Boolean = false; private set
-        private var lastKnownVideoFrameRelativeTsMicros: Long = -1L
-        private var timeAtLastKnownVideoFrameNanos: Long = 0L
-
-        fun start(firstFrameTsMicros: Long) {
-            if (hasTimerStarted && firstFrameTsMicros == _firstMediaFrameAbsoluteTimestampMicros && _firstMediaFrameAbsoluteTimestampMicros != 0L) return
-            if (hasTimerStarted && _firstMediaFrameAbsoluteTimestampMicros != 0L && firstFrameTsMicros == 0L) {
-                LOG.warning("PlaybackTimer: Attempted re-start with TS 0 after non-zero TS. Ignoring.")
-                return
-            }
-            this._firstMediaFrameAbsoluteTimestampMicros = firstFrameTsMicros
-            this.systemStartTimeNanos = System.nanoTime()
-            this.hasTimerStarted = true
-            this.lastKnownVideoFrameRelativeTsMicros = -1L
-            LOG.info("PlaybackTimer: Started/Re-aligned. FirstAbsTS: $firstFrameTsMicros us, SystemAnchor: $systemStartTimeNanos ns")
-        }
-
-        fun getCurrentRelativePlaybackTimeMicros(
-            soundLine: SourceDataLine?,
-            videoFrameRate: Double,
-            currentVideoFrameRelativeTsIfVideo: Long,
-            isVideoFrameJustProcessed: Boolean
-        ): Long {
-            if (!hasTimerStarted) return 0L
-            if (isAudioClockReliableAndActive(soundLine)) return soundLine!!.microsecondPosition
-            else {
-                if (videoFrameRate > 0.001) {
-                    if (isVideoFrameJustProcessed && currentVideoFrameRelativeTsIfVideo >= 0) {
-                        lastKnownVideoFrameRelativeTsMicros = currentVideoFrameRelativeTsIfVideo
-                        timeAtLastKnownVideoFrameNanos = System.nanoTime()
-                        return currentVideoFrameRelativeTsIfVideo
-                    } else if (lastKnownVideoFrameRelativeTsMicros != -1L) {
-                        val nanosSinceLastVideo = System.nanoTime() - timeAtLastKnownVideoFrameNanos
-                        return lastKnownVideoFrameRelativeTsMicros + (nanosSinceLastVideo / 1000L)
-                    }
-                }
-                val elapsedMicros = (System.nanoTime() - systemStartTimeNanos) / 1000L
-                return elapsedMicros
-            }
-        }
-        fun isAudioClockReliableAndActive(soundLine: SourceDataLine?): Boolean = soundLine != null && soundLine.isOpen && soundLine.isRunning
+        (audioProcessingContext as? CloseableCoroutineDispatcher)?.close().also { audioProcessingContext = null }
+        (videoProcessingContext as? CloseableCoroutineDispatcher)?.close().also { videoProcessingContext = null }
+        isMediaClockInitialized = false
+        LOG.info("Player: Resource cleanup finished.")
     }
 }
 
+// Helper extensions (ensure they are defined or remove if not used consistently)
+private fun FFmpegFrameGrabber.hasVideo(): Boolean = this.imageWidth > 0 && this.imageHeight > 0 && this.videoCodec != 0
+private fun FFmpegFrameGrabber.hasAudio(): Boolean = this.audioChannels > 0 && this.sampleRate > 0 && this.audioCodec != 0
+private fun FFmpegFrameGrabber.releaseQuietly() { try { this.release() } catch (e: Exception) { /* ignore */ } }
+// Make sure this is correct for your SourceDataLine usage
+private val SourceDataLine.isActive: Boolean get() = this.isOpen && this.isRunning && this.isActive() // Check Java's isActive()

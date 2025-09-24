@@ -1,0 +1,9 @@
+[submodule "ref/nectplayer"]
+	path = ref/nectplayer
+	url = git@github.com:anilbeesetti/nextplayer.git
+[submodule "ref/fanplayer"]
+	path = ref/fanplayer
+	url = git@github.com:cybernhl/fanplayer.git
+[submodule "ref/ExoPlayer"]
+	path = ref/ExoPlayer
+	url = git@github.com:androidx/media.git

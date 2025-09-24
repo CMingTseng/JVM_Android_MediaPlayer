@@ -1,6 +1,8 @@
 package org.bytedeco.javacv;
 
 import java.util.logging.Logger;
+
+import idv.neo.ffmpeg.media.player.core.UniversalFrameConverter;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.scene.Scene;

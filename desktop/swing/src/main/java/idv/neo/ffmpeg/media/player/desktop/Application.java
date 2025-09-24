@@ -1,21 +1,19 @@
 package idv.neo.ffmpeg.media.player.desktop;
 
-import javax.swing.*;
-
-import java.awt.*;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
-
 import org.bytedeco.javacv.Frame;
-import org.bytedeco.javacv.JavaFxSwingFFmpegPlayer;
-// Import the new UniversalFrameConverter, adjust package if it's different
-import org.bytedeco.javacv.UniversalFrameConverter;
+import idv.neo.ffmpeg.media.player.core.JavaFxSwingComposeFFmpegPlayer; // Kotlin Player
+import idv.neo.ffmpeg.media.player.core.PlayerEvent; // Kotlin PlayerEvent
+import idv.neo.ffmpeg.media.player.core.UniversalFrameConverter;
 
+// 導入 Kotlin 的函數接口
+import kotlin.Unit;
+import kotlin.jvm.functions.Function1;
+import kotlin.jvm.functions.Function2;
 
 import javax.swing.*;
 import java.awt.*;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.awt.image.BufferedImage;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -24,11 +22,12 @@ public class Application {
     private static final Logger LOG_UI = Logger.getLogger(Application.class.getName() + ".UI");
 
     private static JTextField videoUrlField;
-    private static JavaFxSwingFFmpegPlayer player;
+    private static JavaFxSwingComposeFFmpegPlayer player; // Use Kotlin Player
     private static PlayerSurface playerSurface;
     private static JButton playButton;
+    private static JButton stopButton;
     private static JFrame frame;
-    private static volatile int currentFramePixelFormat = -1; // To store pixel format for converter
+    private static volatile int currentFramePixelFormat = -1;
 
     public static void main(String[] args) {
         System.setProperty("java.util.logging.SimpleFormatter.format",
@@ -37,77 +36,91 @@ public class Application {
     }
 
     private static void createAndShowGUI() {
-        frame = new JFrame("Generic Player with Swing UI (Universal Player)");
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        frame = new JFrame("Swing Player with Kotlin Core");
+        frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         frame.setMinimumSize(new Dimension(600, 400));
+
+        frame.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent e) {
+                LOG_UI.info("Window closing event triggered.");
+                if (player != null) {
+                    LOG_UI.info("Stopping player due to window close...");
+                    player.close();
+                }
+                frame.dispose();
+                System.exit(0);
+            }
+        });
 
         playerSurface = new PlayerSurface();
         playerSurface.setPreferredSize(new Dimension(640, 480));
         frame.getContentPane().add(playerSurface, BorderLayout.CENTER);
 
-        JavaFxSwingFFmpegPlayer.Builder playerBuilder = new JavaFxSwingFFmpegPlayer.Builder(
-                (videoFrame, relativeTimestampMicros) -> { // VideoFrameOutputCallback
-                    if (videoFrame != null) {
-                        // Pass the stored/updated pixel format
-                        BufferedImage swingImage = UniversalFrameConverter.convertToBufferedImage(videoFrame, currentFramePixelFormat);
-                        if (swingImage != null) {
-                            playerSurface.updateImage(swingImage);
-                        }
-                    }
-                },
-                new JavaFxSwingFFmpegPlayer.PlayerEventCallback() {
-                    @Override
-                    public void onVideoDimensionsDetected(int width, int height, int pixelFormat) { // Receive pixelFormat
-                        LOG_UI.info("Video dimensions detected: " + width + "x" + height + ", PixelFormat Value: " + pixelFormat);
-                        Application.currentFramePixelFormat = pixelFormat; // Store it for use by the converter
-                        // Optional: Log the name of the pixel format if you have a utility for it
-                        // LOG_UI.info("Pixel Format Name: " + YourPixelFormatUtils.getFormatName(pixelFormat));
+        // PlayerEventCallback for Kotlin Player
+        // 使用 kotlin.jvm.functions.Function1
+        Function1<PlayerEvent, Unit> playerEventCallback = event -> {
+            if (event instanceof PlayerEvent.VideoDimensionsDetected) {
+                PlayerEvent.VideoDimensionsDetected d = (PlayerEvent.VideoDimensionsDetected) event;
+                LOG_UI.info("Video dimensions detected: " + d.getWidth() + "x" + d.getHeight() +
+                        ", PixelFormat: " + d.getPixelFormat() + ", FrameRate: " + d.getFrameRate());
+                Application.currentFramePixelFormat = d.getPixelFormat();
+                SwingUtilities.invokeLater(() -> {
+                    // frame.pack(); // Optional resize
+                });
+            } else if (event instanceof PlayerEvent.PlaybackStarted) {
+                LOG_UI.info("Playback started (UI callback).");
+                SwingUtilities.invokeLater(() -> {
+                    playButton.setText("Playing...");
+                    playButton.setEnabled(false);
+                    stopButton.setEnabled(true);
+                    videoUrlField.setEnabled(false);
+                });
+            } else if (event instanceof PlayerEvent.EndOfMedia) {
+                LOG_UI.info("End of media reached (UI callback).");
+                SwingUtilities.invokeLater(() -> {
+                    playButton.setText("Play Video");
+                    playButton.setEnabled(true);
+                    stopButton.setEnabled(false);
+                    videoUrlField.setEnabled(true);
+                    Application.currentFramePixelFormat = -1;
+                });
+            } else if (event instanceof PlayerEvent.Error) {
+                PlayerEvent.Error err = (PlayerEvent.Error) event;
+                LOG_UI.log(Level.SEVERE, "Player Error (UI callback): " + err.getErrorMessage(), err.getException());
+                SwingUtilities.invokeLater(() -> {
+                    JOptionPane.showMessageDialog(frame,
+                            err.getErrorMessage() + (err.getException() != null ? "\nDetails: " + err.getException().getMessage() : ""),
+                            "Playback Error", JOptionPane.ERROR_MESSAGE);
+                    playButton.setText("Play Video");
+                    playButton.setEnabled(true);
+                    stopButton.setEnabled(false);
+                    videoUrlField.setEnabled(true);
+                    Application.currentFramePixelFormat = -1;
+                });
+            }
+            return Unit.INSTANCE; // Kotlin lambda 返回 Unit
+        };
 
-                        SwingUtilities.invokeLater(() -> {
-                            // UI updates if needed based on dimensions
-                        });
-                    }
-
-                    @Override
-                    public void onPlaybackStarted() {
-                        LOG_UI.info("Playback started.");
-                        // The pixel format should ideally be known by now from onVideoDimensionsDetected.
-                        // So, the original logic trying to get grabber instance here is no longer needed.
-                        SwingUtilities.invokeLater(() -> {
-                            playButton.setText("Playing...");
-                            playButton.setEnabled(false);
-                            videoUrlField.setEnabled(false);
-                        });
-                    }
-
-                    @Override
-                    public void onEndOfMedia() {
-                        LOG_UI.info("End of media reached.");
-                        SwingUtilities.invokeLater(() -> {
-                            playButton.setText("Play Video");
-                            playButton.setEnabled(true);
-                            videoUrlField.setEnabled(true);
-                            Application.currentFramePixelFormat = -1; // Reset pixel format
-                        });
-                    }
-
-                    @Override
-                    public void onError(String errorMessage, Exception e) {
-                        LOG_UI.log(Level.SEVERE, "Player Error: " + errorMessage, e);
-                        SwingUtilities.invokeLater(() -> {
-                            JOptionPane.showMessageDialog(frame,
-                                    errorMessage + (e != null ? "\n" + e.getMessage() : ""),
-                                    "Playback Error", JOptionPane.ERROR_MESSAGE);
-                            playButton.setText("Play Video");
-                            playButton.setEnabled(true);
-                            videoUrlField.setEnabled(true);
-                            Application.currentFramePixelFormat = -1; // Reset pixel format
-                        });
-                    }
+        // VideoFrameOutputCallback for Kotlin Player
+        // 使用 kotlin.jvm.functions.Function2
+        Function2<Frame, Long, Unit> videoFrameOutputCallback = (videoFrame, relativeTimestampMicros) -> {
+            if (videoFrame != null) {
+                BufferedImage swingImage = UniversalFrameConverter.convertToBufferedImage(videoFrame, currentFramePixelFormat);
+                if (swingImage != null) {
+                    SwingUtilities.invokeLater(() -> playerSurface.updateImage(swingImage));
                 }
+            }
+            return Unit.INSTANCE; // Kotlin lambda 返回 Unit
+        };
+
+        player = new JavaFxSwingComposeFFmpegPlayer(
+                videoFrameOutputCallback,
+                playerEventCallback,
+                null // AudioDataOutputCallback is Function3, can be null
         );
 
-        player = playerBuilder.build();
+        // ... (rest of the UI setup code remains the same) ...
 
         JPanel controlPanel = new JPanel(new BorderLayout());
         JPanel inputPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -119,8 +132,13 @@ public class Application {
 
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER));
         playButton = new JButton("Play Video");
+        stopButton = new JButton("Stop");
+        stopButton.setEnabled(false);
+
         buttonPanel.add(playButton);
+        buttonPanel.add(stopButton);
         controlPanel.add(buttonPanel, BorderLayout.CENTER);
+
         frame.getContentPane().add(controlPanel, BorderLayout.SOUTH);
 
         playButton.addActionListener(e -> {
@@ -130,9 +148,18 @@ public class Application {
                 return;
             }
             LOG_UI.info("Play button clicked. URL: " + videoUrl);
-            playButton.setEnabled(false);
-            videoUrlField.setEnabled(false);
-            player.start(videoUrl); // Player is async
+            player.start(videoUrl);
+        });
+
+        stopButton.addActionListener(e -> {
+            LOG_UI.info("Stop button clicked.");
+            if (player != null) {
+                player.stop();
+            }
+            playButton.setText("Play Video");
+            playButton.setEnabled(true);
+            stopButton.setEnabled(false);
+            videoUrlField.setEnabled(true);
         });
 
         frame.pack();

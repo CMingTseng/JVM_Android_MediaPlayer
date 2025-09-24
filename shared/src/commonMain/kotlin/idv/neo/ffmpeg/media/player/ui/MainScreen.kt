@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.TextStyle
@@ -23,7 +22,7 @@ import androidx.compose.ui.unit.IntSize
 
 @Composable
 fun MainScreen(modifier: Modifier = Modifier) {
-    val viewModel: MainViewModel = viewModel<MainViewModel>()
+    val viewModel: MainViewModel = getViewModel()
     val countdown by viewModel.countdownValue.collectAsState()
     val imageBitmap: ImageBitmap? by viewModel.videoFrameBitmap.collectAsState() // Collect the bitmap
     var videoUrl by remember { mutableStateOf("https://github.com/rambod-rahmani/ffmpeg-video-player/raw/refs/heads/master/Iron_Man-Trailer_HD.mp4") }

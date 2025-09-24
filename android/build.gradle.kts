@@ -45,6 +45,7 @@ dependencies {
 
 //    implementation(projects.core)
     implementation(projects.shared)
+    implementation(project(":shared"))
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

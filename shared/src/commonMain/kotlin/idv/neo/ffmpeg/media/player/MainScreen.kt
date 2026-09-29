@@ -25,7 +25,7 @@ fun MainScreen(
     player: Player
 ) {
     val testUrls = listOf(
-        "https://video-ws-hls-aws.langhongtw.com/live/6891794Y/playlist.m3u8",
+        "https://github.com/rambod-rahmani/ffmpeg-video-player/raw/refs/heads/master/Iron_Man-Trailer_HD.mp4",
     )
     var videoUrl by remember { mutableStateOf(testUrls[0]) }
     var showUrlList by remember { mutableStateOf(false) }

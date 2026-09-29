@@ -60,12 +60,13 @@ kotlin {
 
 dependencies {
     implementation(project(":shared"))
-
-    api(libs.media3.ui)
-    api(libs.media3.common)
-    api(libs.media3.common.ktx)
-    api(libs.media3.exoplayer)
-    api(libs.media3.datasource.okhttp)
+    implementation(libs.media3.common)
+    implementation(libs.media3.common.ktx)
+    implementation(libs.media3.ui)
+    implementation(libs.media3.ui.compose)
+    implementation(libs.media3.ui.compose.material3)
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.datasource.okhttp)
 
 
     implementation(libs.androidx.activity.compose)

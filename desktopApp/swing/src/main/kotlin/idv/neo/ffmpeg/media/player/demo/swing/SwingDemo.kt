@@ -1,6 +1,7 @@
 package idv.neo.ffmpeg.media.player.demo.swing
 
 import idv.neo.ffmpeg.media.player.core.JvmJavaCvPlayer
+import idv.neo.ffmpeg.media.player.core.audio.JvmAudioSink
 import idv.neo.ffmpeg.media.player.core.video.swing.JvmVideoSink
 import androidx.media3.common.MediaItem
 import java.awt.BorderLayout
@@ -23,7 +24,7 @@ fun createAndShowGUI() {
     val videoSink = JvmVideoSink()
     
     // 2. 將 Sink 注入播放器
-    val player = JvmJavaCvPlayer.create(videoSink)
+    val player = JvmJavaCvPlayer.create(videoSink, JvmAudioSink())
     
     // 3. 從 VideoSink 取得加速後的 JPanel
     val videoComponent = videoSink.getView(null) as Component

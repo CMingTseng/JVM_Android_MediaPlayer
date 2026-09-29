@@ -6,10 +6,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.media3.common.Player
 
 @Composable
-@Preview
-fun App(player: Player? = null) {
+fun App(player: Player) {
     MaterialTheme {
-        val actualPlayer = player ?: rememberPlayer()
-        MainScreen(player = actualPlayer)
+        MainScreen(  player)
     }
 }

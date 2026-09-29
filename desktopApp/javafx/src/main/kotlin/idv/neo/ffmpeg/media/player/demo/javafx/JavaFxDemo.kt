@@ -1,6 +1,7 @@
 package idv.neo.ffmpeg.media.player.demo.javafx
 
 import idv.neo.ffmpeg.media.player.core.JvmJavaCvPlayer
+import idv.neo.ffmpeg.media.player.core.audio.JvmAudioSink
 import idv.neo.ffmpeg.media.player.core.video.javafx.JavaFxPixelBufferVideoSink
 import androidx.media3.common.MediaItem
 import javafx.application.Application
@@ -19,7 +20,7 @@ class JavaFxDemo : Application() {
         val videoSink = JavaFxPixelBufferVideoSink()
         
         // 2. 將 Sink 注入播放器
-        player = JvmJavaCvPlayer.create(videoSink)
+        player = JvmJavaCvPlayer.create(videoSink, JvmAudioSink())
 
         // 3. 從 Sink 取得 UI 組件 (StackPane 封裝了 ImageView)
         val videoView = videoSink.getView(null) as Pane

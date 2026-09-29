@@ -1,11 +1,15 @@
 package idv.neo.ffmpeg.media.player
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.*
-import idv.neo.ffmpeg.media.player.ui.MainScreen
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.media3.common.Player
+
 @Composable
-fun App() {
+@Preview
+fun App(player: Player? = null) {
     MaterialTheme {
-        MainScreen()
+        val actualPlayer = player ?: rememberPlayer()
+        MainScreen(player = actualPlayer)
     }
 }

@@ -32,7 +32,8 @@ pluginManagement {
         maven(url = "https://maven.aliyun.com/repository/spring/")
         maven(url = "https://maven.aliyun.com/repository/google/")
         maven(url = "https://maven.aliyun.com/repository/grails-core/")
-        maven(url = "https://maven.aliyun.com/repository/apache-snapshots/'")
+        maven(url = "https://maven.aliyun.com/repository/apache-snapshots/")
+        maven(url = "https://packages.jetbrains.team/maven/p/skija/maven")
     }
     plugins {
 
@@ -51,6 +52,7 @@ val versionComponents = fullVersion
     .map { Integer.parseInt(it) }
 
 val currentJdk = if (versionComponents[0] == 1) versionComponents[1] else versionComponents[0]
+
 
 @Suppress("UnstableApiUsage")
 dependencyResolutionManagement {
@@ -74,16 +76,32 @@ dependencyResolutionManagement {
         maven(url = "https://maven.aliyun.com/repository/public/")
         maven(url = "https://maven.aliyun.com/repository/spring/")
         maven(url = "https://maven.aliyun.com/repository/google/")
+        maven(url = "https://packages.jetbrains.team/maven/p/skija/maven")
     }
 }
 
-rootProject.name = "JVM_Android_MediaPlayer"
-include(":shared")
-include(":desktop:compose")
-project(":desktop:compose").projectDir = file("./desktop/compose")
-include(":desktop:swing")
-project(":desktop:swing").projectDir = file("./desktop/swing")
-include(":desktop:JavaFX")
-project(":desktop:JavaFX").projectDir = file("./desktop/JavaFx")
-include(":android")
+rootProject.name = "JavaCvPlayerDemo"
 
+apply(from = "gradle/include_utils.gradle.kts")
+val includeExternalProject = extra["includeExternalProject"] as (String, String) -> Unit
+
+// includeExternalProject(":lib-common-lite", "/media3_exoplyaer/libraries/common_lite")
+
+// includeExternalProject(":lib-ui-compose", "/media3_exoplyaer/libraries/ui_compose")
+// includeExternalProject(":lib-ui-compose-material3", "/media3_exoplyaer/libraries/ui_compose_material3")
+
+includeExternalProject(":core", "/libraries/core")
+includeExternalProject(":core_ui_compose", "/libraries/core_ui_compose")
+
+includeExternalProject(":core-video-swing", "/libraries/core-video-swing")
+includeExternalProject(":core-video-javafx", "/libraries/core-video-javafx")
+includeExternalProject(":core-video-compose-jvm", "/libraries/core-video-compose-jvm")
+includeExternalProject(":core-video-skia", "/libraries/core-video-skia")
+
+includeExternalProject(":core-video-android", "/libraries/core-video-android")
+
+include(":shared")
+
+include(":desktopApp:compose")
+include(":desktopApp:swing")
+include(":desktopApp:javafx")

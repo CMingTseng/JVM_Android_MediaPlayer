@@ -1,5 +1,9 @@
+@file:JvmName("SharedPlatformJvm")
+
 package idv.neo.ffmpeg.media.player
 
-actual fun getPlatform(): Platform {
-    TODO("Not yet implemented")
+class JVMPlatform: Platform {
+    override val name: String = "Java ${System.getProperty("java.version")}"
 }
+
+actual fun getPlatform(): Platform = JVMPlatform()

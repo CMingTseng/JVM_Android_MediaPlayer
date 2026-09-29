@@ -1,9 +1,9 @@
 package idv.neo.ffmpeg.media.player
 
 class Greeting {
-    private val platform: Platform = getPlatform()
+    private val platform = getPlatform()
 
     fun greet(): String {
-        return "Hello, ${platform.name}!"
+        return sayHello(platform.name)
     }
 }

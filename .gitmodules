@@ -7,3 +7,9 @@
 [submodule "ref/ExoPlayer"]
 	path = ref/ExoPlayer
 	url = git@github.com:androidx/media.git
+[submodule "media3_exoplyaer"]
+	path = media3_exoplyaer
+	url = git@github.com:cybernhl/media.git
+[submodule "libraries"]
+	path = libraries
+	url = git@github.com:CMingTseng/JavaCvPlayer.git

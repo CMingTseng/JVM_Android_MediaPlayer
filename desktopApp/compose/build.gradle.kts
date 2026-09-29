@@ -1,4 +1,5 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     kotlin("jvm")
@@ -16,17 +17,24 @@ java {
 
 kotlin {
     compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+        jvmTarget = JvmTarget.JVM_17
     }
 }
 
 dependencies {
-    implementation(project(":core"))
-    implementation(project(":core-video-compose-jvm"))
+    // JitPack 遠端依賴 (Group ID 規則: com.github.CMingTseng.JavaCvPlayer，快取於 ~/.gradle/caches/modules-2/files-2.1/com.github.CMingTseng.JavaCvPlayer/)
+    // 本地源碼發布使用 Group ID: idv.neo.ffmpeg.media.player，路徑: ~/.m2/repository/idv/neo/ffmpeg/media/player/
+    // 切換為本地源碼開發請註解遠端依賴並解開 implementation(project(...))
+    // implementation(project(":core"))
+    implementation("com.github.CMingTseng.JavaCvPlayer:core:v1.0.2")
+    // implementation(project(":core-video-compose-jvm"))
+    implementation("com.github.CMingTseng.JavaCvPlayer:core-video-compose-jvm:v1.0.2")
 //    implementation(project(":lib-common-lite"))
     implementation("com.github.cybernhl.media:lib-common-lite:727538c430")
-    implementation(project(":core-video-skia"))
-    implementation(project(":core_ui_compose"))
+    // implementation(project(":core-video-skia"))
+    implementation("com.github.CMingTseng.JavaCvPlayer:core-video-skia:v1.0.2")
+    // implementation(project(":core_ui_compose"))
+    implementation("com.github.CMingTseng.JavaCvPlayer:core_ui_compose:v1.0.2")
     implementation("com.github.cybernhl.media:lib-ui-compose-material3:727538c430")
     implementation(project(":shared"))
 

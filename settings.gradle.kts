@@ -57,6 +57,7 @@ val currentJdk = if (versionComponents[0] == 1) versionComponents[1] else versio
 @Suppress("UnstableApiUsage")
 dependencyResolutionManagement {
     repositories {
+        mavenLocal()
         mavenCentral()
         google()
         maven {
@@ -90,15 +91,17 @@ val includeExternalProject = extra["includeExternalProject"] as (String, String)
 // includeExternalProject(":lib-ui-compose", "/media3_exoplyaer/libraries/ui_compose")
 // includeExternalProject(":lib-ui-compose-material3", "/media3_exoplyaer/libraries/ui_compose_material3")
 
-includeExternalProject(":core", "/libraries/core")
-includeExternalProject(":core_ui_compose", "/libraries/core_ui_compose")
+// 切換說明：若需本機源碼開發，請解開下方 includeExternalProject 註解，並至各模組 build.gradle.kts 切換為 project(...) 本地依賴。
+// 若使用 JitPack 遠端依賴 (com.github.CMingTseng.JavaCvPlayer:*:v1.0.2)，請保持下方 includeExternalProject 為註解狀態。
+// includeExternalProject(":core", "/libraries/core")
+// includeExternalProject(":core_ui_compose", "/libraries/core_ui_compose")
 
-includeExternalProject(":core-video-swing", "/libraries/core-video-swing")
-includeExternalProject(":core-video-javafx", "/libraries/core-video-javafx")
-includeExternalProject(":core-video-compose-jvm", "/libraries/core-video-compose-jvm")
-includeExternalProject(":core-video-skia", "/libraries/core-video-skia")
+// includeExternalProject(":core-video-swing", "/libraries/core-video-swing")
+// includeExternalProject(":core-video-javafx", "/libraries/core-video-javafx")
+// includeExternalProject(":core-video-compose-jvm", "/libraries/core-video-compose-jvm")
+// includeExternalProject(":core-video-skia", "/libraries/core-video-skia")
 
-includeExternalProject(":core-video-android", "/libraries/core-video-android")
+// includeExternalProject(":core-video-android", "/libraries/core-video-android")
 
 include(":shared")
 

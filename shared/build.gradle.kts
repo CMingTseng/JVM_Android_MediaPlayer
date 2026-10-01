@@ -144,9 +144,9 @@ kotlin {
             // 本地源碼發布使用 Group ID: idv.neo.ffmpeg.media.player，路徑: ~/.m2/repository/idv/neo/ffmpeg/media/player/
             // 切換為本地源碼開發請註解遠端依賴並解開 api(project(...))
 //            implementation(project(":core"))
-            implementation("com.github.CMingTseng.JavaCvPlayer:core:v1.0.2")
+            implementation("com.github.CMingTseng.JavaCvPlayer:core:1.0.0")
 //            implementation(project(":core_ui_compose"))
-            implementation("com.github.CMingTseng.JavaCvPlayer:core_ui_compose:v1.0.2")
+            implementation("com.github.CMingTseng.JavaCvPlayer:core_ui_compose:1.0.0")
             compileOnly("com.github.cybernhl.media:lib-common-lite:727538c430")
             compileOnly("com.github.cybernhl.media:lib-ui-compose:727538c430")
             compileOnly("com.github.cybernhl.media:lib-ui-compose-material3:727538c430")
@@ -158,8 +158,6 @@ kotlin {
         androidMain.dependencies {
             implementation(libs.jetbrains.compose.ui.tooling)
             implementation(libs.jetbrains.compose.ui.tooling.preview)
-            implementation(libs.media3.ui.compose)
-            implementation(libs.media3.ui.compose.material3)
         }
 
         jvmMain.dependencies {
@@ -168,7 +166,7 @@ kotlin {
             implementation("com.github.cybernhl.media:lib-ui-compose-material3:727538c430")
 
 //             implementation(project(":core-video-skia"))
-            implementation("com.github.CMingTseng.JavaCvPlayer:core-video-skia:v1.0.2")
+            implementation("com.github.CMingTseng.JavaCvPlayer:core-video-skia:1.0.0")
             implementation(libs.org.bytedeco.javacv.platform)
             implementation(libs.org.bytedeco.ffmpeg.platform.gpl)
             implementation(libs.org.openjfx.javafx.graphics)

@@ -19,8 +19,15 @@ class JavaFxDemo : Application() {
         // 1. 手動建立專為 JavaFX 優化的 VideoSink (來自 :core-video-javafx)
         val videoSink = JavaFxPixelBufferVideoSink()
         
-        // 2. 將 Sink 注入播放器
-        player = JvmJavaCvPlayer.create(videoSink, JvmAudioSink())
+        // 2. 根據作業系統自動選擇硬體解碼器 (若該晶片/設備不支援，FFmpegFrameLoader 將自動 Fallback 至軟解)
+        val ffmpegOptions = getPlatformHardwareDecoderOption()
+        
+        // 3. 將 Sink 與選項注入播放器
+        player = JvmJavaCvPlayer.create(
+            videoSink = videoSink,
+            audioSink = JvmAudioSink(),
+            options = ffmpegOptions
+        )
 
         // 3. 從 Sink 取得 UI 組件 (StackPane 封裝了 ImageView)
         val videoView = videoSink.getView(null) as Pane
@@ -47,6 +54,23 @@ class JavaFxDemo : Application() {
     override fun stop() {
         player.release()
         super.stop()
+    }
+
+    /**
+     * 根據 OS 平台自動選擇對應的硬體加速解碼器：
+     * - macOS: VideoToolbox ("h264_videotoolbox")
+     * - Windows: NVIDIA NVDEC ("h264_nvdec")
+     * - Linux / Intel: QuickSync ("h264_qsv")
+     */
+    private fun getPlatformHardwareDecoderOption(): Map<String, String> {
+        val osName = System.getProperty("os.name", "").lowercase()
+        val vcodec = when {
+            osName.contains("mac") || osName.contains("darwin") -> "h264_videotoolbox"
+            osName.contains("win") -> "h264_nvdec"
+            osName.contains("nux") || osName.contains("nix") -> "h264_qsv"
+            else -> null
+        }
+        return if (vcodec != null) mapOf("vcodec" to vcodec) else emptyMap()
     }
 }
 

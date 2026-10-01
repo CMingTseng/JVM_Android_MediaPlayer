@@ -144,6 +144,7 @@ dependencies {
     implementation(project(":core_ui_compose"))
     implementation(project(":shared"))
     implementation("com.github.cybernhl.media:lib-common-lite:727538c430")
+    implementation("com.github.cybernhl.media:lib-ui-compose:727538c430")
     implementation("com.github.cybernhl.media:lib-ui-compose-material3:727538c430")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)

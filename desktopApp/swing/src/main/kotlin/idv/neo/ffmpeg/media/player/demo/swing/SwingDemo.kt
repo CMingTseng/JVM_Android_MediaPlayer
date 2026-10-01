@@ -23,8 +23,13 @@ fun createAndShowGUI() {
     // 1. 手動建立專為 Swing 優化的 VideoSink (來自 :core-video-swing)
     val videoSink = JvmVideoSink()
     
-    // 2. 將 Sink 注入播放器
-    val player = JvmJavaCvPlayer.create(videoSink, JvmAudioSink())
+    // 2. 根據 OS 自動設定硬體加速，將 Sink 與選項注入播放器
+    val ffmpegOptions = getPlatformHardwareDecoderOption()
+    val player = JvmJavaCvPlayer.create(
+        videoSink = videoSink,
+        audioSink = JvmAudioSink(),
+        options = ffmpegOptions
+    )
     
     // 3. 從 VideoSink 取得加速後的 JPanel
     val videoComponent = videoSink.getView(null) as Component
@@ -56,4 +61,21 @@ fun createAndShowGUI() {
             player.release()
         }
     })
+}
+
+/**
+ * 根據 OS 平台自動選擇對應的硬體加速解碼器：
+ * - macOS: VideoToolbox ("h264_videotoolbox")
+ * - Windows: NVIDIA NVDEC ("h264_nvdec")
+ * - Linux / Intel: QuickSync ("h264_qsv")
+ */
+private fun getPlatformHardwareDecoderOption(): Map<String, String> {
+    val osName = System.getProperty("os.name", "").lowercase()
+    val vcodec = when {
+        osName.contains("mac") || osName.contains("darwin") -> "h264_videotoolbox"
+        osName.contains("win") -> "h264_nvdec"
+        osName.contains("nux") || osName.contains("nix") -> "h264_qsv"
+        else -> null
+    }
+    return if (vcodec != null) mapOf("vcodec" to vcodec) else emptyMap()
 }
